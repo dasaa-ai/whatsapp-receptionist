@@ -534,33 +534,37 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
       replyText =
         "Hi Host 👋\nRight now this MVP is optimized for guest inbound messages.\nNext step: we’ll add a host dashboard + host-initiated flows.\nFor now, please test by messaging from the guest number into the sandbox.";
     } else if (!role) {
-      if (stage === "new") {
-        nextStage = "awaiting_role";
-        replyText =
-          "Welcome! 👋\n\nAre you:\n1) a *Guest*\n2) the *Host / Owner*\n\nReply with 1 or 2.";
-      } else if (stage === "awaiting_role") {
-        const chosen = inferRoleChoice(body);
+  if (idReceived) {
+    nextRole = "guest";
+    nextStage = "active";
+    replyText = TOPIC_REPLIES[topic] || TOPIC_REPLIES.general;
+  } else if (stage === "new") {
+    nextStage = "awaiting_role";
+    replyText =
+      "Welcome! 👋\n\nAre you:\n1) a *Guest*\n2) the *Host / Owner*\n\nReply with 1 or 2.";
+  } else if (stage === "awaiting_role") {
+    const chosen = inferRoleChoice(body);
 
-        if (!chosen) {
-          replyText = "Please reply with:\n1) Guest\n2) Host / Owner";
-        } else {
-          nextRole = chosen;
-          nextStage = "active";
-
-          if (chosen === "guest") {
-            replyText =
-              "Great 😊\nYou can ask me things like:\n• check-in time\n• Wi-Fi\n• parking\n• directions\n\nWhat do you need help with?";
-          } else {
-            replyText =
-              "Thanks! ✅\nRight now auto-replies are enabled.\nNext we’ll add host controls + approvals.\nWhat would you like to test next?";
-          }
-        }
-      } else {
-        nextStage = "awaiting_role";
-        replyText =
-          "Quick check 😊 Are you:\n1) Guest\n2) Host / Owner\n\nReply with 1 or 2.";
-      }
+    if (!chosen) {
+      replyText = "Please reply with:\n1) Guest\n2) Host / Owner";
     } else {
+      nextRole = chosen;
+      nextStage = "active";
+
+      if (chosen === "guest") {
+        replyText =
+          "Great 😊\nYou can ask me things like:\n• check-in time\n• Wi-Fi\n• parking\n• directions\n\nWhat do you need help with?";
+      } else {
+        replyText =
+          "Thanks! ✅\nRight now auto-replies are enabled.\nNext we’ll add host controls + approvals.\nWhat would you like to test next?";
+      }
+    }
+  } else {
+    nextStage = "awaiting_role";
+    replyText =
+      "Quick check 😊 Are you:\n1) Guest\n2) Host / Owner\n\nReply with 1 or 2.";
+  }
+} else {
       nextStage = "active";
       replyText = TOPIC_REPLIES[topic] || TOPIC_REPLIES.general;
     }
