@@ -530,21 +530,34 @@ export async function POST(req: Request) {
           totalReceived >= requiredGuestDocuments && requiredGuestDocuments > 0;
         const remaining = Math.max(requiredGuestDocuments - totalReceived, 0);
 
-        const { error: convUpdateErr } = await supabaseAdmin
-          .from("conversations")
-          .update({
-            stage: isComplete ? "document_received" : "awaiting_guest_id",
-            id_received: isComplete,
-            required_guest_documents: requiredGuestDocuments,
-            received_guest_documents: totalReceived,
-            document_status: isComplete ? "received" : "partial",
-            last_inbound_at: new Date().toISOString(),
-          })
-          .eq("id", conversationId);
+        const updatePayload = {
+  stage: isComplete ? "document_received" : "awaiting_guest_id",
+  id_received: isComplete,
+  required_guest_documents: requiredGuestDocuments,
+  received_guest_documents: totalReceived,
+  document_status: isComplete ? "received" : "partial",
+  last_inbound_at: new Date().toISOString(),
+};
 
-        if (convUpdateErr) {
-          console.error("Conversation update error:", convUpdateErr);
-        }
+console.log("About to update conversation with:", {
+  conversationId,
+  updatePayload,
+});
+
+const { data: updatedConversation, error: convUpdateErr } = await supabaseAdmin
+  .from("conversations")
+  .update(updatePayload)
+  .eq("id", conversationId)
+  .select(
+    "id, stage, id_received, required_guest_documents, received_guest_documents, document_status, last_inbound_at"
+  )
+  .single();
+
+if (convUpdateErr) {
+  console.error("Conversation update error:", convUpdateErr);
+} else {
+  console.log("Conversation updated row:", updatedConversation);
+}
 
         if (isComplete) {
           replyText = `Thank you — we have received all ${totalReceived} required guest ID document(s).`;
