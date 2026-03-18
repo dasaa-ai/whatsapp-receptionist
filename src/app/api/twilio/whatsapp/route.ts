@@ -432,6 +432,37 @@ if (bookingId) {
       );
 
     if (requiresIdUpload) {
+      const { count: existingDocForMessageCount, error: existingDocForMessageErr } =
+  await supabaseAdmin
+    .from("guest_documents")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId)
+    .eq("twilio_message_sid", messageSid)
+    .is("deleted_at", null);
+
+if (existingDocForMessageErr) {
+  console.error("Error checking existing guest documents for message:", existingDocForMessageErr);
+}
+
+if ((existingDocForMessageCount ?? 0) > 0) {
+  console.log("Skipping duplicate document processing for MessageSid:", messageSid);
+
+  const duplicateReply = await translateIfNeeded(
+    "We already received this document message.",
+    guestLanguage
+  );
+
+  const twiml =
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<Response>` +
+    `<Message>${xmlEscape(duplicateReply)}</Message>` +
+    `</Response>`;
+
+  return new Response(twiml, {
+    status: 200,
+    headers: { "Content-Type": "text/xml" },
+  });
+}
       if (!hasMedia) {
         await supabaseAdmin
           .from("conversations")
