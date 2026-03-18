@@ -545,6 +545,39 @@ if (bookingId) {
 
         const totalReceived = totalDocumentCount ?? successCount;
 
+        // 🔥 NEW: Mark booking guests as received (one per document)
+if (bookingId) {
+  const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
+    .from("booking_guests")
+    .select("id, full_name")
+    .eq("booking_id", bookingId)
+    .eq("id_required", true)
+    .eq("id_received", false)
+    .order("created_at", { ascending: true })
+    .limit(successCount);
+
+  if (missingGuestsErr) {
+    console.error("Error fetching missing booking guests:", missingGuestsErr);
+  } else if (missingGuests && missingGuests.length > 0) {
+    const guestIdsToUpdate = missingGuests.map((g) => g.id);
+
+    const { error: guestUpdateErr } = await supabaseAdmin
+      .from("booking_guests")
+      .update({
+        id_received: true,
+        verification_status: "received",
+      })
+      .in("id", guestIdsToUpdate);
+
+    if (guestUpdateErr) {
+      console.error("Error updating booking guests:", guestUpdateErr);
+    } else {
+      console.log("Marked guests as received:", guestIdsToUpdate);
+    }
+  }
+}
+
+
         if (bookingId) {
   const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
     .from("booking_guests")
@@ -596,6 +629,7 @@ if (bookingId) {
 
 const isComplete =
   finalReceivedCount >= requiredGuestDocuments && requiredGuestDocuments > 0;
+
 const remaining = Math.max(requiredGuestDocuments - finalReceivedCount, 0);
 
         const updatePayload = {
