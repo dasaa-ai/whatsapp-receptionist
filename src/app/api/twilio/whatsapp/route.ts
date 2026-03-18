@@ -441,35 +441,39 @@ export async function POST(req: Request) {
 }
 
       let replyText = "";
-      let nextStage = stage;
 
-      if (successCount > 0) {
-        nextStage = "document_received";
-        replyText = `Thank you — we received ${successCount} document(s) securely.`;
+if (successCount > 0) {
+  replyText = `Thank you — we received ${successCount} document(s) securely.`;
 
-        if (invalidCount > 0 || failedCount > 0) {
-          replyText += ` ${invalidCount + failedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
-        }
-      } else {
-        replyText =
-          "We could not process your document yet. To continue check-in, please send a clear photo of your ID or passport here on WhatsApp in JPG, PNG, or PDF format.";
-      }
+  if (invalidCount > 0 || failedCount > 0) {
+    replyText += ` ${invalidCount + failedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
+  }
 
-console.log("Updating conversation stage", {
-  conversationId,
-  oldStage: stage,
-  nextStage,
-  successCount,
-});
+  console.log("Forcing conversation stage update to document_received", {
+    conversationId,
+    successCount,
+  });
 
-      const { error: convUpdateErr } = await supabaseAdmin
-  .from("conversations")
-  .update({ stage: nextStage, last_inbound_at: new Date().toISOString() })
-  .eq("id", conversationId);
+  const { data: updatedConv, error: convUpdateErr } = await supabaseAdmin
+    .from("conversations")
+    .update({
+      stage: "document_received",
+      last_inbound_at: new Date().toISOString(),
+    })
+    .eq("id", conversationId)
+    .select("id, stage")
+    .single();
 
-if (convUpdateErr) {
-  console.error("Conversation stage update error:", convUpdateErr);
+  if (convUpdateErr) {
+    console.error("Conversation stage update error:", convUpdateErr);
+  } else {
+    console.log("Conversation stage updated successfully:", updatedConv);
+  }
+} else {
+  replyText =
+    "We could not process your document yet. To continue check-in, please send a clear photo of your ID or passport here on WhatsApp in JPG, PNG, or PDF format.";
 }
+
 
       const translatedReply = await translateIfNeeded(replyText, guestLanguage);
 
