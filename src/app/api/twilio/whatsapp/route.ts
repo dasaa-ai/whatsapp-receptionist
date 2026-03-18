@@ -10,8 +10,6 @@ import { uploadGuestDocument } from "@/lib/uploadGuestDocument";
 
 export const runtime = "nodejs";
 
-// ---------- helpers ----------
-
 function xmlEscape(s: string) {
   return s
     .replaceAll("&", "&amp;")
@@ -28,6 +26,14 @@ type TwilioInbound = {
   MessageSid?: string;
   ProfileName?: string;
 };
+
+type TopicKey =
+  | "checkin"
+  | "checkout"
+  | "wifi"
+  | "parking"
+  | "pricing"
+  | "general";
 
 async function translateIfNeeded(
   text: string,
@@ -144,14 +150,6 @@ async function parseTwilioRequest(
   }
 }
 
-type TopicKey =
-  | "checkin"
-  | "checkout"
-  | "wifi"
-  | "parking"
-  | "pricing"
-  | "general";
-
 function detectTopic(body: string): TopicKey {
   const t = (body || "").toLowerCase();
 
@@ -229,7 +227,6 @@ export async function POST(req: Request) {
 
   try {
     const from = payload.From ?? "";
-    const to = payload.To ?? "";
     const body = payload.Body ?? "";
     const messageSid = payload.MessageSid ?? "";
     const profileName = payload.ProfileName ?? "";
@@ -252,7 +249,19 @@ export async function POST(req: Request) {
 
     let { data: existingConv, error: convFindErr } = await supabaseAdmin
       .from("conversations")
-      .select("id, stage, role, guest_language, host_language, id_received")
+      .select(`
+        id,
+        stage,
+        role,
+        guest_language,
+        host_language,
+        booking_id,
+        guest_name,
+        required_guest_documents,
+        received_guest_documents,
+        verified_guest_documents,
+        document_status
+      `)
       .eq("property_id", propertyId)
       .eq("guest_phone_e164", guestPhone)
       .maybeSingle();
@@ -275,10 +284,25 @@ export async function POST(req: Request) {
           status: "open",
           stage: "new",
           role: null,
-          id_received: false,
+          document_status: "not_requested",
+          required_guest_documents: 1,
+          received_guest_documents: 0,
+          verified_guest_documents: 0,
           last_inbound_at: new Date().toISOString(),
         })
-        .select("id, stage, role, guest_language, host_language, id_received")
+        .select(`
+          id,
+          stage,
+          role,
+          guest_language,
+          host_language,
+          booking_id,
+          guest_name,
+          required_guest_documents,
+          received_guest_documents,
+          verified_guest_documents,
+          document_status
+        `)
         .single();
 
       if (convCreateErr) {
@@ -296,24 +320,9 @@ export async function POST(req: Request) {
     }
 
     const conversationId = existingConv.id as string;
-const stage = (existingConv.stage as string) || "new";
-const role = (existingConv.role as string) || null;
-
-const { count: existingDocumentCount, error: existingDocumentCountErr } =
-  await supabaseAdmin
-    .from("guest_documents")
-    .select("*", { count: "exact", head: true })
-    .eq("conversation_id", conversationId)
-    .is("deleted_at", null);
-
-if (existingDocumentCountErr) {
-  return new Response(
-    `Error checking guest documents: ${existingDocumentCountErr.message}`,
-    { status: 500 }
-  );
-}
-
-const idReceived = (existingDocumentCount ?? 0) > 0;
+    const stage = (existingConv.stage as string) || "new";
+    const role = (existingConv.role as string) || null;
+    const bookingId = (existingConv as any)?.booking_id ?? null;
 
     let guestLanguage = (existingConv as any)?.guest_language as string | null;
     if (!guestLanguage && body.trim()) {
@@ -345,6 +354,7 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
       topic,
       provider: "twilio",
       provider_message_id: messageSid,
+      from_e164: from,
     });
 
     if (inboundErr) {
@@ -352,6 +362,48 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
         status: 500,
       });
     }
+
+    let requiredGuestDocuments =
+      Number((existingConv as any)?.required_guest_documents ?? 1) || 1;
+
+    if (bookingId) {
+      const { count: requiredCount, error: requiredCountErr } = await supabaseAdmin
+        .from("booking_guests")
+        .select("*", { count: "exact", head: true })
+        .eq("booking_id", bookingId)
+        .eq("id_required", true);
+
+      if (!requiredCountErr && requiredCount && requiredCount > 0) {
+        requiredGuestDocuments = requiredCount;
+      } else {
+        const { data: bookingRow } = await supabaseAdmin
+          .from("bookings")
+          .select("adult_guest_count")
+          .eq("id", bookingId)
+          .maybeSingle();
+
+        const adults = Number((bookingRow as any)?.adult_guest_count ?? 1) || 1;
+        requiredGuestDocuments = adults;
+      }
+    }
+
+    const { count: existingDocumentCount, error: existingDocumentCountErr } =
+      await supabaseAdmin
+        .from("guest_documents")
+        .select("*", { count: "exact", head: true })
+        .eq("conversation_id", conversationId)
+        .is("deleted_at", null);
+
+    if (existingDocumentCountErr) {
+      return new Response(
+        `Error checking guest documents: ${existingDocumentCountErr.message}`,
+        { status: 500 }
+      );
+    }
+
+    const receivedGuestDocuments = existingDocumentCount ?? 0;
+    const idReceived =
+      receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
 
     const requiresIdUpload =
       !idReceived &&
@@ -363,8 +415,23 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
 
     if (requiresIdUpload) {
       if (!hasMedia) {
+        await supabaseAdmin
+          .from("conversations")
+          .update({
+            required_guest_documents: requiredGuestDocuments,
+            received_guest_documents: receivedGuestDocuments,
+            id_received: idReceived,
+            document_status: receivedGuestDocuments > 0 ? "partial" : "requested",
+            last_inbound_at: new Date().toISOString(),
+          })
+          .eq("id", conversationId);
+
+        const remaining = Math.max(requiredGuestDocuments - receivedGuestDocuments, 0);
+
         const reminderReply = await translateIfNeeded(
-          "To continue check-in, please send a clear photo of your ID or passport here on WhatsApp. You can send it now or later when ready. Accepted formats: JPG, PNG, PDF.",
+          remaining > 1
+            ? `To continue check-in, please send the remaining ${remaining} guest ID documents here on WhatsApp. Accepted formats: JPG, PNG, PDF.`
+            : `To continue check-in, please send the remaining guest ID document here on WhatsApp. Accepted formats: JPG, PNG, PDF.`,
           guestLanguage
         );
 
@@ -376,6 +443,7 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
           topic: "general",
           provider: "twilio",
           provider_message_id: outboundProviderMsgId,
+          to_e164: guestPhone,
         });
 
         const twiml =
@@ -394,37 +462,23 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
       let invalidCount = 0;
       let failedCount = 0;
 
-      const bookingId = null;
-
       for (const mediaItem of mediaItems) {
-        console.log("Processing media item", {
-          index: mediaItem.index,
-          contentType: mediaItem.contentType,
-          url: mediaItem.url,
-        });
-
         if (!isAllowedDocumentType(mediaItem.contentType)) {
-          console.log("Rejected media type", mediaItem.contentType);
           invalidCount += 1;
           continue;
         }
 
         try {
           const fileBuffer = await downloadTwilioMedia(mediaItem.url);
-          console.log("Downloaded media bytes", fileBuffer.length);
-
           const extension = getExtensionFromMimeType(mediaItem.contentType);
 
           const storagePath = `conversation-${conversationId}/${Date.now()}-${mediaItem.index}-${messageSid}.${extension}`;
-          console.log("Uploading to storage path", storagePath);
 
           const uploaded = await uploadGuestDocument({
             fileBuffer,
             contentType: mediaItem.contentType || "application/octet-stream",
             storagePath,
           });
-
-          console.log("Upload success", uploaded);
 
           const retentionDeleteAt = new Date();
           retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
@@ -442,15 +496,14 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
               file_size_bytes: fileBuffer.length,
               document_kind: "id_document",
               review_status: "pending",
+              verification_status: "pending",
               retention_delete_at: retentionDeleteAt.toISOString(),
             });
 
           if (insertError) {
-            console.error("guest_documents insert error", insertError);
             throw insertError;
           }
 
-          console.log("guest_documents insert success");
           successCount += 1;
         } catch (error) {
           console.error("Failed processing media item:", error);
@@ -461,50 +514,46 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
       let replyText = "";
 
       if (successCount > 0) {
-        replyText = `Thank you — we received ${successCount} document(s) securely.`;
+        const { count: totalDocumentCount, error: totalDocumentCountErr } =
+          await supabaseAdmin
+            .from("guest_documents")
+            .select("*", { count: "exact", head: true })
+            .eq("conversation_id", conversationId)
+            .is("deleted_at", null);
+
+        if (totalDocumentCountErr) {
+          console.error("Error counting guest documents:", totalDocumentCountErr);
+        }
+
+        const totalReceived = totalDocumentCount ?? successCount;
+        const isComplete =
+          totalReceived >= requiredGuestDocuments && requiredGuestDocuments > 0;
+        const remaining = Math.max(requiredGuestDocuments - totalReceived, 0);
+
+        const { error: convUpdateErr } = await supabaseAdmin
+          .from("conversations")
+          .update({
+            stage: isComplete ? "document_received" : "awaiting_guest_id",
+            id_received: isComplete,
+            required_guest_documents: requiredGuestDocuments,
+            received_guest_documents: totalReceived,
+            document_status: isComplete ? "received" : "partial",
+            last_inbound_at: new Date().toISOString(),
+          })
+          .eq("id", conversationId);
+
+        if (convUpdateErr) {
+          console.error("Conversation update error:", convUpdateErr);
+        }
+
+        if (isComplete) {
+          replyText = `Thank you — we have received all ${totalReceived} required guest ID document(s).`;
+        } else {
+          replyText = `Thank you — we have received ${totalReceived} of ${requiredGuestDocuments} required guest ID document(s). Please send the remaining ${remaining}.`;
+        }
 
         if (invalidCount > 0 || failedCount > 0) {
           replyText += ` ${invalidCount + failedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
-        }
-
-        console.log("Forcing conversation stage update to document_received", {
-          conversationId,
-          successCount,
-        });
-
-        const { count: totalDocumentCount, error: totalDocumentCountErr } =
-  await supabaseAdmin
-    .from("guest_documents")
-    .select("*", { count: "exact", head: true })
-    .eq("conversation_id", conversationId)
-    .is("deleted_at", null);
-
-if (totalDocumentCountErr) {
-  console.error("Error counting guest documents:", totalDocumentCountErr);
-}
-
-const { data: updatedConv, error: convUpdateErr } = await supabaseAdmin
-  .from("conversations")
-  .update({
-    stage: "document_received",
-    id_received: true,
-    received_guest_documents: totalDocumentCount ?? successCount,
-    last_inbound_at: new Date().toISOString(),
-  })
-  .eq("id", conversationId)
-  .select("id, stage, id_received, received_guest_documents")
-  .single();
-
-if (convUpdateErr) {
-  console.error("Conversation stage update error:", convUpdateErr);
-} else {
-  console.log("Conversation stage updated successfully:", updatedConv);
-}
-
-        if (convUpdateErr) {
-          console.error("Conversation stage update error:", convUpdateErr);
-        } else {
-          console.log("Conversation stage updated successfully:", updatedConv);
         }
       } else {
         replyText =
@@ -521,6 +570,7 @@ if (convUpdateErr) {
         topic: "general",
         provider: "twilio",
         provider_message_id: outboundProviderMsgId,
+        to_e164: guestPhone,
       });
 
       if (outboundErr) {
@@ -552,42 +602,52 @@ if (convUpdateErr) {
       replyText =
         "Hi Host 👋\nRight now this MVP is optimized for guest inbound messages.\nNext step: we’ll add a host dashboard + host-initiated flows.\nFor now, please test by messaging from the guest number into the sandbox.";
     } else if (!role) {
-  if (idReceived) {
-    nextRole = "guest";
-    nextStage = "active";
-    replyText = TOPIC_REPLIES[topic] || TOPIC_REPLIES.general;
-  } else if (stage === "new") {
-    nextStage = "awaiting_role";
-    replyText =
-      "Welcome! 👋\n\nAre you:\n1) a *Guest*\n2) the *Host / Owner*\n\nReply with 1 or 2.";
-  } else if (stage === "awaiting_role") {
-    const chosen = inferRoleChoice(body);
-
-    if (!chosen) {
-      replyText = "Please reply with:\n1) Guest\n2) Host / Owner";
-    } else {
-      nextRole = chosen;
-      nextStage = "active";
-
-      if (chosen === "guest") {
+      if (idReceived) {
+        nextRole = "guest";
+        nextStage = "active";
+        replyText = TOPIC_REPLIES[topic] || TOPIC_REPLIES.general;
+      } else if (stage === "new") {
+        nextStage = "awaiting_role";
         replyText =
-          "Great 😊\nYou can ask me things like:\n• check-in time\n• Wi-Fi\n• parking\n• directions\n\nWhat do you need help with?";
+          "Welcome! 👋\n\nAre you:\n1) a *Guest*\n2) the *Host / Owner*\n\nReply with 1 or 2.";
+      } else if (stage === "awaiting_role") {
+        const chosen = inferRoleChoice(body);
+
+        if (!chosen) {
+          replyText = "Please reply with:\n1) Guest\n2) Host / Owner";
+        } else {
+          nextRole = chosen;
+          nextStage = "active";
+
+          if (chosen === "guest") {
+            replyText =
+              "Great 😊\nYou can ask me things like:\n• check-in time\n• Wi-Fi\n• parking\n• directions\n\nWhat do you need help with?";
+          } else {
+            replyText =
+              "Thanks! ✅\nRight now auto-replies are enabled.\nNext we’ll add host controls + approvals.\nWhat would you like to test next?";
+          }
+        }
       } else {
+        nextStage = "awaiting_role";
         replyText =
-          "Thanks! ✅\nRight now auto-replies are enabled.\nNext we’ll add host controls + approvals.\nWhat would you like to test next?";
+          "Quick check 😊 Are you:\n1) Guest\n2) Host / Owner\n\nReply with 1 or 2.";
       }
-    }
-  } else {
-    nextStage = "awaiting_role";
-    replyText =
-      "Quick check 😊 Are you:\n1) Guest\n2) Host / Owner\n\nReply with 1 or 2.";
-  }
-} else {
+    } else {
       nextStage = "active";
       replyText = TOPIC_REPLIES[topic] || TOPIC_REPLIES.general;
     }
 
-    const convUpdate: Record<string, any> = {};
+    const convUpdate: Record<string, any> = {
+      required_guest_documents: requiredGuestDocuments,
+      received_guest_documents: receivedGuestDocuments,
+      id_received: idReceived,
+      document_status: idReceived
+        ? "received"
+        : receivedGuestDocuments > 0
+          ? "partial"
+          : "not_requested",
+    };
+
     if (nextStage !== stage) convUpdate.stage = nextStage;
     if (nextRole !== role) convUpdate.role = nextRole;
 
@@ -620,6 +680,7 @@ if (convUpdateErr) {
       topic,
       provider: "twilio",
       provider_message_id: outboundProviderMsgId,
+      to_e164: guestPhone,
     });
 
     if (outboundErr) {
