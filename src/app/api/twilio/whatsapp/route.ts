@@ -19,6 +19,13 @@ function xmlEscape(s: string) {
     .replaceAll("'", "&apos;");
 }
 
+function emptyTwimlResponse() {
+  return new Response(`<?xml version="1.0" encoding="UTF-8"?><Response></Response>`, {
+    status: 200,
+    headers: { "Content-Type": "text/xml" },
+  });
+}
+
 type TwilioInbound = {
   From?: string;
   To?: string;
@@ -116,7 +123,6 @@ async function detectGuestLanguage(text: string): Promise<string> {
 async function parseTwilioRequest(
   req: Request
 ): Promise<{
-  rawBody: string;
   payload: TwilioInbound;
   paramsObj: Record<string, string>;
 }> {
@@ -139,14 +145,14 @@ async function parseTwilioRequest(
       paramsObj[k] = v;
     });
 
-    return { rawBody, payload, paramsObj };
+    return { payload, paramsObj };
   }
 
   try {
     const json = JSON.parse(rawBody || "{}") as TwilioInbound;
-    return { rawBody, payload: json, paramsObj: {} };
+    return { payload: json, paramsObj: {} };
   } catch {
-    return { rawBody, payload: {}, paramsObj: {} };
+    return { payload: {}, paramsObj: {} };
   }
 }
 
@@ -260,7 +266,8 @@ export async function POST(req: Request) {
         required_guest_documents,
         received_guest_documents,
         verified_guest_documents,
-        document_status
+        document_status,
+        id_received
       `)
       .eq("property_id", propertyId)
       .eq("guest_phone_e164", guestPhone)
@@ -288,6 +295,7 @@ export async function POST(req: Request) {
           required_guest_documents: 1,
           received_guest_documents: 0,
           verified_guest_documents: 0,
+          id_received: false,
           last_inbound_at: new Date().toISOString(),
         })
         .select(`
@@ -301,7 +309,8 @@ export async function POST(req: Request) {
           required_guest_documents,
           received_guest_documents,
           verified_guest_documents,
-          document_status
+          document_status,
+          id_received
         `)
         .single();
 
@@ -323,6 +332,28 @@ export async function POST(req: Request) {
     const stage = (existingConv.stage as string) || "new";
     const role = (existingConv.role as string) || null;
     const bookingId = (existingConv as any)?.booking_id ?? null;
+
+    // Idempotency: if inbound message already logged, do not process again.
+    const { count: existingInboundMessageCount, error: existingInboundMessageErr } =
+      await supabaseAdmin
+        .from("messages")
+        .select("*", { count: "exact", head: true })
+        .eq("conversation_id", conversationId)
+        .eq("provider", "twilio")
+        .eq("provider_message_id", messageSid)
+        .eq("direction", "inbound");
+
+    if (existingInboundMessageErr) {
+      console.error(
+        "Error checking existing inbound message for MessageSid:",
+        existingInboundMessageErr
+      );
+    }
+
+    if ((existingInboundMessageCount ?? 0) > 0) {
+      console.log("Skipping duplicate inbound processing for MessageSid:", messageSid);
+      return emptyTwimlResponse();
+    }
 
     let guestLanguage = (existingConv as any)?.guest_language as string | null;
     if (!guestLanguage && body.trim()) {
@@ -365,45 +396,33 @@ export async function POST(req: Request) {
 
     let requiredGuestDocuments = 1;
 
-if (bookingId) {
-  console.log("Booking linked to conversation:", bookingId);
+    if (bookingId) {
+      const { count: requiredCount, error: requiredCountErr } = await supabaseAdmin
+        .from("booking_guests")
+        .select("*", { count: "exact", head: true })
+        .eq("booking_id", bookingId)
+        .eq("id_required", true);
 
-  // 1. Try booking_guests (future-proof)
-  const { count: requiredCount, error: requiredCountErr } = await supabaseAdmin
-    .from("booking_guests")
-    .select("*", { count: "exact", head: true })
-    .eq("booking_id", bookingId)
-    .eq("id_required", true);
+      if (!requiredCountErr && typeof requiredCount === "number" && requiredCount > 0) {
+        requiredGuestDocuments = requiredCount;
+      } else {
+        const { data: bookingRow, error: bookingErr } = await supabaseAdmin
+          .from("bookings")
+          .select("adult_guest_count")
+          .eq("id", bookingId)
+          .maybeSingle();
 
-  if (!requiredCountErr && typeof requiredCount === "number" && requiredCount > 0) {
-    console.log("Using booking_guests count:", requiredCount);
-    requiredGuestDocuments = requiredCount;
-  } else {
-    // 2. Fallback → bookings.adult_guest_count
-    const { data: bookingRow, error: bookingErr } = await supabaseAdmin
-      .from("bookings")
-      .select("adult_guest_count")
-      .eq("id", bookingId)
-      .maybeSingle();
+        if (bookingErr) {
+          console.error("Error fetching booking adult count:", bookingErr);
+        }
 
-    if (bookingErr) {
-      console.error("Error fetching booking:", bookingErr);
+        const adults = Number((bookingRow as any)?.adult_guest_count ?? 1) || 1;
+        requiredGuestDocuments = adults;
+      }
+    } else {
+      requiredGuestDocuments =
+        Number((existingConv as any)?.required_guest_documents ?? 1) || 1;
     }
-
-    const adults = Number((bookingRow as any)?.adult_guest_count ?? 1) || 1;
-
-    console.log("Using booking adult_guest_count:", adults);
-
-    requiredGuestDocuments = adults;
-  }
-} else {
-  // fallback (only if no booking linked)
-  requiredGuestDocuments =
-    Number((existingConv as any)?.required_guest_documents ?? 1) || 1;
-
-  console.log("No booking linked, using conversation value:", requiredGuestDocuments);
-}
-  
 
     const { count: existingDocumentCount, error: existingDocumentCountErr } =
       await supabaseAdmin
@@ -432,37 +451,27 @@ if (bookingId) {
       );
 
     if (requiresIdUpload) {
+      // Extra idempotency protection for document uploads.
       const { count: existingDocForMessageCount, error: existingDocForMessageErr } =
-  await supabaseAdmin
-    .from("guest_documents")
-    .select("*", { count: "exact", head: true })
-    .eq("conversation_id", conversationId)
-    .eq("twilio_message_sid", messageSid)
-    .is("deleted_at", null);
+        await supabaseAdmin
+          .from("guest_documents")
+          .select("*", { count: "exact", head: true })
+          .eq("conversation_id", conversationId)
+          .eq("twilio_message_sid", messageSid)
+          .is("deleted_at", null);
 
-if (existingDocForMessageErr) {
-  console.error("Error checking existing guest documents for message:", existingDocForMessageErr);
-}
+      if (existingDocForMessageErr) {
+        console.error(
+          "Error checking existing guest documents for message:",
+          existingDocForMessageErr
+        );
+      }
 
-if ((existingDocForMessageCount ?? 0) > 0) {
-  console.log("Skipping duplicate document processing for MessageSid:", messageSid);
+      if ((existingDocForMessageCount ?? 0) > 0) {
+        console.log("Skipping duplicate document processing for MessageSid:", messageSid);
+        return emptyTwimlResponse();
+      }
 
-  const duplicateReply = await translateIfNeeded(
-    "We already received this document message.",
-    guestLanguage
-  );
-
-  const twiml =
-    `<?xml version="1.0" encoding="UTF-8"?>` +
-    `<Response>` +
-    `<Message>${xmlEscape(duplicateReply)}</Message>` +
-    `</Response>`;
-
-  return new Response(twiml, {
-    status: 200,
-    headers: { "Content-Type": "text/xml" },
-  });
-}
       if (!hasMedia) {
         await supabaseAdmin
           .from("conversations")
@@ -563,140 +572,86 @@ if ((existingDocForMessageCount ?? 0) > 0) {
       let replyText = "";
 
       if (successCount > 0) {
-        const { count: totalDocumentCount, error: totalDocumentCountErr } =
-          await supabaseAdmin
-            .from("guest_documents")
-            .select("*", { count: "exact", head: true })
-            .eq("conversation_id", conversationId)
-            .is("deleted_at", null);
+        // Mark next missing required guests as received.
+        if (bookingId) {
+          const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
+            .from("booking_guests")
+            .select("id, full_name")
+            .eq("booking_id", bookingId)
+            .eq("id_required", true)
+            .eq("id_received", false)
+            .order("created_at", { ascending: true })
+            .limit(successCount);
 
-        if (totalDocumentCountErr) {
-          console.error("Error counting guest documents:", totalDocumentCountErr);
+          if (missingGuestsErr) {
+            console.error("Error fetching missing booking guests:", missingGuestsErr);
+          } else if (missingGuests && missingGuests.length > 0) {
+            const guestIdsToUpdate = missingGuests.map((g) => g.id);
+
+            const { error: guestUpdateErr } = await supabaseAdmin
+              .from("booking_guests")
+              .update({
+                id_received: true,
+                verification_status: "received",
+              })
+              .in("id", guestIdsToUpdate);
+
+            if (guestUpdateErr) {
+              console.error("Error updating booking guests:", guestUpdateErr);
+            } else {
+              console.log("Marked booking guests as received:", guestIdsToUpdate);
+            }
+          }
         }
 
-        const totalReceived = totalDocumentCount ?? successCount;
-
-        // 🔥 NEW: Mark booking guests as received (one per document)
-if (bookingId) {
-  const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
-    .from("booking_guests")
-    .select("id, full_name")
-    .eq("booking_id", bookingId)
-    .eq("id_required", true)
-    .eq("id_received", false)
-    .order("created_at", { ascending: true })
-    .limit(successCount);
-
-  if (missingGuestsErr) {
-    console.error("Error fetching missing booking guests:", missingGuestsErr);
-  } else if (missingGuests && missingGuests.length > 0) {
-    const guestIdsToUpdate = missingGuests.map((g) => g.id);
-
-    const { error: guestUpdateErr } = await supabaseAdmin
-      .from("booking_guests")
-      .update({
-        id_received: true,
-        verification_status: "received",
-      })
-      .in("id", guestIdsToUpdate);
-
-    if (guestUpdateErr) {
-      console.error("Error updating booking guests:", guestUpdateErr);
-    } else {
-      console.log("Marked guests as received:", guestIdsToUpdate);
-    }
-  }
-}
-
+        let finalReceivedCount = successCount;
 
         if (bookingId) {
-  const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
-    .from("booking_guests")
-    .select("id, full_name")
-    .eq("booking_id", bookingId)
-    .eq("id_required", true)
-    .eq("id_received", false)
-    .order("created_at", { ascending: true })
-    .limit(successCount);
+          const { count: receivedGuestCount, error: receivedGuestCountErr } =
+            await supabaseAdmin
+              .from("booking_guests")
+              .select("*", { count: "exact", head: true })
+              .eq("booking_id", bookingId)
+              .eq("id_required", true)
+              .eq("id_received", true);
 
-  if (missingGuestsErr) {
-    console.error("Error fetching missing booking guests:", missingGuestsErr);
-  } else if (missingGuests && missingGuests.length > 0) {
-    const guestIdsToUpdate = missingGuests.map((g) => g.id);
+          if (receivedGuestCountErr) {
+            console.error(
+              "Error counting received booking guests:",
+              receivedGuestCountErr
+            );
+          } else if (typeof receivedGuestCount === "number") {
+            finalReceivedCount = receivedGuestCount;
+          }
+        }
 
-    const { error: guestUpdateErr } = await supabaseAdmin
-      .from("booking_guests")
-      .update({
-        id_received: true,
-        verification_status: "received",
-      })
-      .in("id", guestIdsToUpdate);
-
-    if (guestUpdateErr) {
-      console.error("Error updating booking guests:", guestUpdateErr);
-    } else {
-      console.log("Marked booking guests as received:", guestIdsToUpdate);
-    }
-  }
-}
-
-        let finalReceivedCount = totalReceived;
-
-if (bookingId) {
-  const { count: receivedGuestCount, error: receivedGuestCountErr } =
-    await supabaseAdmin
-      .from("booking_guests")
-      .select("*", { count: "exact", head: true })
-      .eq("booking_id", bookingId)
-      .eq("id_required", true)
-      .eq("id_received", true);
-
-  if (receivedGuestCountErr) {
-    console.error("Error counting received booking guests:", receivedGuestCountErr);
-  } else if (typeof receivedGuestCount === "number") {
-    finalReceivedCount = receivedGuestCount;
-  }
-}
-
-const isComplete =
-  finalReceivedCount >= requiredGuestDocuments && requiredGuestDocuments > 0;
-
-const remaining = Math.max(requiredGuestDocuments - finalReceivedCount, 0);
+        const isComplete =
+          finalReceivedCount >= requiredGuestDocuments && requiredGuestDocuments > 0;
+        const remaining = Math.max(requiredGuestDocuments - finalReceivedCount, 0);
 
         const updatePayload = {
-  stage: isComplete ? "document_received" : "awaiting_guest_id",
-  id_received: isComplete,
-  required_guest_documents: requiredGuestDocuments,
-  received_guest_documents: finalReceivedCount,
-  document_status: isComplete ? "received" : "partial",
-  last_inbound_at: new Date().toISOString(),
-};
+          stage: isComplete ? "document_received" : "awaiting_guest_id",
+          id_received: isComplete,
+          required_guest_documents: requiredGuestDocuments,
+          received_guest_documents: finalReceivedCount,
+          document_status: isComplete ? "received" : "partial",
+          last_inbound_at: new Date().toISOString(),
+        };
 
-console.log("About to update conversation with:", {
-  conversationId,
-  updatePayload,
-});
+        const { error: convUpdateErr } = await supabaseAdmin
+          .from("conversations")
+          .update(updatePayload)
+          .eq("id", conversationId);
 
-const { data: updatedConversation, error: convUpdateErr } = await supabaseAdmin
-  .from("conversations")
-  .update(updatePayload)
-  .eq("id", conversationId)
-  .select(
-    "id, stage, id_received, required_guest_documents, received_guest_documents, document_status, last_inbound_at"
-  )
-  .single();
-
-if (convUpdateErr) {
-  console.error("Conversation update error:", convUpdateErr);
-} else {
-  console.log("Conversation updated row:", updatedConversation);
-}
+        if (convUpdateErr) {
+          console.error("Conversation update error:", convUpdateErr);
+        }
 
         if (isComplete) {
-  replyText = `Thank you — we have received all ${finalReceivedCount} required guest ID document(s).`;
-} else {
-  replyText = `Thank you — we have received ${finalReceivedCount} of ${requiredGuestDocuments} required guest ID document(s). Please send the remaining ${remaining}.`;
-}
+          replyText = `Thank you — we have received all ${finalReceivedCount} required guest ID document(s).`;
+        } else {
+          replyText = `Thank you — we have received ${finalReceivedCount} of ${requiredGuestDocuments} required guest ID document(s). Please send the remaining ${remaining}.`;
+        }
 
         if (invalidCount > 0 || failedCount > 0) {
           replyText += ` ${invalidCount + failedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
@@ -858,3 +813,4 @@ export async function GET() {
     note: "Twilio WhatsApp webhook endpoint. Use POST from Twilio.",
   });
 }
+
