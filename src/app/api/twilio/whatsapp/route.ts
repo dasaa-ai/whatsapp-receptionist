@@ -472,16 +472,34 @@ const idReceived = (existingDocumentCount ?? 0) > 0;
           successCount,
         });
 
-        const { data: updatedConv, error: convUpdateErr } = await supabaseAdmin
-          .from("conversations")
-          .update({
-            stage: "document_received",
-            id_received: true,
-            last_inbound_at: new Date().toISOString(),
-          })
-          .eq("id", conversationId)
-          .select("id, stage, id_received")
-          .single();
+        const { count: totalDocumentCount, error: totalDocumentCountErr } =
+  await supabaseAdmin
+    .from("guest_documents")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId)
+    .is("deleted_at", null);
+
+if (totalDocumentCountErr) {
+  console.error("Error counting guest documents:", totalDocumentCountErr);
+}
+
+const { data: updatedConv, error: convUpdateErr } = await supabaseAdmin
+  .from("conversations")
+  .update({
+    stage: "document_received",
+    id_received: true,
+    received_guest_documents: totalDocumentCount ?? successCount,
+    last_inbound_at: new Date().toISOString(),
+  })
+  .eq("id", conversationId)
+  .select("id, stage, id_received, received_guest_documents")
+  .single();
+
+if (convUpdateErr) {
+  console.error("Conversation stage update error:", convUpdateErr);
+} else {
+  console.log("Conversation stage updated successfully:", updatedConv);
+}
 
         if (convUpdateErr) {
           console.error("Conversation stage update error:", convUpdateErr);
