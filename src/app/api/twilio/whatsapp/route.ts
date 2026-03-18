@@ -379,52 +379,66 @@ export async function POST(req: Request) {
       const bookingId = null;
 
       for (const mediaItem of mediaItems) {
-        if (!isAllowedDocumentType(mediaItem.contentType)) {
-          invalidCount += 1;
-          continue;
-        }
+  console.log("Processing media item", {
+    index: mediaItem.index,
+    contentType: mediaItem.contentType,
+    url: mediaItem.url,
+  });
 
-        try {
-          const fileBuffer = await downloadTwilioMedia(mediaItem.url);
-          const extension = getExtensionFromMimeType(mediaItem.contentType);
+  if (!isAllowedDocumentType(mediaItem.contentType)) {
+    console.log("Rejected media type", mediaItem.contentType);
+    invalidCount += 1;
+    continue;
+  }
 
-          const storagePath = `conversation-${conversationId}/${Date.now()}-${mediaItem.index}-${messageSid}.${extension}`;
+  try {
+    const fileBuffer = await downloadTwilioMedia(mediaItem.url);
+    console.log("Downloaded media bytes", fileBuffer.length);
 
-          const uploaded = await uploadGuestDocument({
-            fileBuffer,
-            contentType: mediaItem.contentType || "application/octet-stream",
-            storagePath,
-          });
+    const extension = getExtensionFromMimeType(mediaItem.contentType);
 
-          const retentionDeleteAt = new Date();
-          retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
+    const storagePath = `conversation-${conversationId}/${Date.now()}-${mediaItem.index}-${messageSid}.${extension}`;
+    console.log("Uploading to storage path", storagePath);
 
-          const { error: insertError } = await supabaseAdmin
-            .from("guest_documents")
-            .insert({
-              conversation_id: conversationId,
-              booking_id: bookingId,
-              guest_phone: guestPhone,
-              twilio_message_sid: messageSid,
-              storage_bucket: uploaded.bucket,
-              storage_path: uploaded.path,
-              mime_type: mediaItem.contentType,
-              file_size_bytes: fileBuffer.length,
-              document_kind: "id_document",
-              review_status: "pending",
-              retention_delete_at: retentionDeleteAt.toISOString(),
-            });
+    const uploaded = await uploadGuestDocument({
+      fileBuffer,
+      contentType: mediaItem.contentType || "application/octet-stream",
+      storagePath,
+    });
 
-          if (insertError) {
-            throw insertError;
-          }
+    console.log("Upload success", uploaded);
 
-          successCount += 1;
-        } catch (error) {
-          console.error("Failed processing media item:", error);
-          failedCount += 1;
-        }
-      }
+    const retentionDeleteAt = new Date();
+    retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
+
+    const { error: insertError } = await supabaseAdmin
+      .from("guest_documents")
+      .insert({
+        conversation_id: conversationId,
+        booking_id: bookingId,
+        guest_phone: guestPhone,
+        twilio_message_sid: messageSid,
+        storage_bucket: uploaded.bucket,
+        storage_path: uploaded.path,
+        mime_type: mediaItem.contentType,
+        file_size_bytes: fileBuffer.length,
+        document_kind: "id_document",
+        review_status: "pending",
+        retention_delete_at: retentionDeleteAt.toISOString(),
+      });
+
+    if (insertError) {
+      console.error("guest_documents insert error", insertError);
+      throw insertError;
+    }
+
+    console.log("guest_documents insert success");
+    successCount += 1;
+  } catch (error) {
+    console.error("Failed processing media item:", error);
+    failedCount += 1;
+  }
+}
 
       let replyText = "";
       let nextStage = stage;
