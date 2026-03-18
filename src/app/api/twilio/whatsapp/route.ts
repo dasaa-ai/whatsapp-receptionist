@@ -455,18 +455,21 @@ export async function POST(req: Request) {
           "We could not process your document yet. To continue check-in, please send a clear photo of your ID or passport here on WhatsApp in JPG, PNG, or PDF format.";
       }
 
-      if (nextStage !== stage) {
-        const { error: convUpdateErr } = await supabaseAdmin
-          .from("conversations")
-          .update({ stage: nextStage })
-          .eq("id", conversationId);
+console.log("Updating conversation stage", {
+  conversationId,
+  oldStage: stage,
+  nextStage,
+  successCount,
+});
 
-        if (convUpdateErr) {
-          return new Response(`Error updating conversation: ${convUpdateErr.message}`, {
-            status: 500,
-          });
-        }
-      }
+      const { error: convUpdateErr } = await supabaseAdmin
+  .from("conversations")
+  .update({ stage: nextStage, last_inbound_at: new Date().toISOString() })
+  .eq("id", conversationId);
+
+if (convUpdateErr) {
+  console.error("Conversation stage update error:", convUpdateErr);
+}
 
       const translatedReply = await translateIfNeeded(replyText, guestLanguage);
 
