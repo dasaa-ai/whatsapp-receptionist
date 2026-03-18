@@ -363,29 +363,47 @@ export async function POST(req: Request) {
       });
     }
 
-    let requiredGuestDocuments =
-      Number((existingConv as any)?.required_guest_documents ?? 1) || 1;
+    let requiredGuestDocuments = 1;
 
-    if (bookingId) {
-      const { count: requiredCount, error: requiredCountErr } = await supabaseAdmin
-        .from("booking_guests")
-        .select("*", { count: "exact", head: true })
-        .eq("booking_id", bookingId)
-        .eq("id_required", true);
+if (bookingId) {
+  console.log("Booking linked to conversation:", bookingId);
 
-      if (!requiredCountErr && requiredCount && requiredCount > 0) {
-        requiredGuestDocuments = requiredCount;
-      } else {
-        const { data: bookingRow } = await supabaseAdmin
-          .from("bookings")
-          .select("adult_guest_count")
-          .eq("id", bookingId)
-          .maybeSingle();
+  // 1. Try booking_guests (future-proof)
+  const { count: requiredCount, error: requiredCountErr } = await supabaseAdmin
+    .from("booking_guests")
+    .select("*", { count: "exact", head: true })
+    .eq("booking_id", bookingId)
+    .eq("id_required", true);
 
-        const adults = Number((bookingRow as any)?.adult_guest_count ?? 1) || 1;
-        requiredGuestDocuments = adults;
-      }
+  if (!requiredCountErr && typeof requiredCount === "number" && requiredCount > 0) {
+    console.log("Using booking_guests count:", requiredCount);
+    requiredGuestDocuments = requiredCount;
+  } else {
+    // 2. Fallback → bookings.adult_guest_count
+    const { data: bookingRow, error: bookingErr } = await supabaseAdmin
+      .from("bookings")
+      .select("adult_guest_count")
+      .eq("id", bookingId)
+      .maybeSingle();
+
+    if (bookingErr) {
+      console.error("Error fetching booking:", bookingErr);
     }
+
+    const adults = Number((bookingRow as any)?.adult_guest_count ?? 1) || 1;
+
+    console.log("Using booking adult_guest_count:", adults);
+
+    requiredGuestDocuments = adults;
+  }
+} else {
+  // fallback (only if no booking linked)
+  requiredGuestDocuments =
+    Number((existingConv as any)?.required_guest_documents ?? 1) || 1;
+
+  console.log("No booking linked, using conversation value:", requiredGuestDocuments);
+}
+  
 
     const { count: existingDocumentCount, error: existingDocumentCountErr } =
       await supabaseAdmin
