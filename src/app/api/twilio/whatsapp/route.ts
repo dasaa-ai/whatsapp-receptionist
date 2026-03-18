@@ -296,9 +296,24 @@ export async function POST(req: Request) {
     }
 
     const conversationId = existingConv.id as string;
-    const stage = (existingConv.stage as string) || "new";
-    const role = (existingConv.role as string) || null;
-    const idReceived = Boolean((existingConv as any)?.id_received);
+const stage = (existingConv.stage as string) || "new";
+const role = (existingConv.role as string) || null;
+
+const { count: existingDocumentCount, error: existingDocumentCountErr } =
+  await supabaseAdmin
+    .from("guest_documents")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId)
+    .is("deleted_at", null);
+
+if (existingDocumentCountErr) {
+  return new Response(
+    `Error checking guest documents: ${existingDocumentCountErr.message}`,
+    { status: 500 }
+  );
+}
+
+const idReceived = (existingDocumentCount ?? 0) > 0;
 
     let guestLanguage = (existingConv as any)?.guest_language as string | null;
     if (!guestLanguage && body.trim()) {
