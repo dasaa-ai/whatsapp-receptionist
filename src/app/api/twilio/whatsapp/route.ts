@@ -253,7 +253,7 @@ export async function POST(req: Request) {
     let { data: existingConv, error: convFindErr } = await supabaseAdmin
       .from("conversations")
       .select(
-        "id, stage, role, guest_language, host_language, booking_id"
+        "id, stage, role, guest_language, host_language"
       )
       .eq("property_id", propertyId)
       .eq("guest_phone_e164", guestPhone)
@@ -279,7 +279,7 @@ export async function POST(req: Request) {
           role: null,
           last_inbound_at: new Date().toISOString(),
         })
-        .select("id, stage, role, guest_language, host_language, booking_id")
+        .select("id, stage, role, guest_language, host_language")
         .single();
 
       if (convCreateErr) {
@@ -376,7 +376,7 @@ export async function POST(req: Request) {
       let invalidCount = 0;
       let failedCount = 0;
 
-      const bookingId = (existingConv as any)?.booking_id || null;
+      const bookingId = null;
 
       for (const mediaItem of mediaItems) {
         if (!isAllowedDocumentType(mediaItem.contentType)) {
