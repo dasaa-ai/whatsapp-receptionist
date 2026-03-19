@@ -139,28 +139,29 @@ async function detectGuestLanguage(
 
   console.log("[LANG][INPUT]", { original: text, normalized: t });
   console.log("[LANG][SCRIPTS]", {
-  devanagari: /[\u0900-\u097F]/.test(t),
-  gurmukhi: /[\u0A00-\u0A7F]/.test(t),
-  odia: /[\u0B00-\u0B7F]/.test(t),
+  devanagariLetters: /[\u0904-\u0939\u0958-\u0961]/.test(t),
+  gurmukhiLetters: /[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t),
+  odiaLetters: /[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t),
 });
 
   if (!t) {
     return { language: "en", confidence: 0.2, source: "fallback" };
   }
 
-  // Fast-path: Devanagari script (Hindi, Marathi, Nepali, etc.)
-  if (/[\u0900-\u097F]/.test(t)) {
-    return { language: "hi", confidence: 0.97, source: "rule_based" };
-  }
-
-// Gurmukhi script (Punjabi)
-if (/[\u0A00-\u0A7F]/.test(t)) {
+// Gurmukhi script (Punjabi) - check before Devanagari
+if (/[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t)) {
   return { language: "pa", confidence: 0.97, source: "rule_based" };
 }
 
-// Odia script
-if (/[\u0B00-\u0B7F]/.test(t)) {
+// Odia script - check before Devanagari
+if (/[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t)) {
   return { language: "or", confidence: 0.97, source: "rule_based" };
+}
+
+// Devanagari letters (Hindi/Marathi/Nepali etc.)
+// Avoid matching only punctuation like "।"
+if (/[\u0904-\u0939\u0958-\u0961]/.test(t)) {
+  return { language: "hi", confidence: 0.97, source: "rule_based" };
 }
 
   // Strong rule-based checks first
