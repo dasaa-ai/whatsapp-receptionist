@@ -181,10 +181,14 @@ if (/[\u0B00-\u0B7F]/.test(t)) {
   }
 
   // Avoid over-detecting on tiny messages like "ok", "yes", "hi"
-  const meaningfulText = t.replace(/[0-9\W_]+/g, " ").trim();
-  if (meaningfulText.length < 4) {
-    return { language: "en", confidence: 0.3, source: "fallback" };
-  }
+  
+  const meaningfulChars = Array.from(t).filter((ch) =>
+  /\p{L}|\p{N}/u.test(ch)
+);
+
+if (meaningfulChars.length < 4) {
+  return { language: "en", confidence: 0.3, source: "fallback" };
+}
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -237,11 +241,17 @@ if (/[\u0B00-\u0B7F]/.test(t)) {
 }
 
 function shouldAttemptLanguageDetection(text: string) {
-  const t = (text || "").trim().toLowerCase();
+  const t = (text || "").trim();
   if (!t) return false;
 
-  const stripped = t.replace(/[0-9\W_]+/g, "");
-  if (stripped.length < 4) return false;
+  // Count Unicode letters/numbers across all scripts
+  const meaningfulChars = Array.from(t).filter((ch) =>
+    /\p{L}|\p{N}/u.test(ch)
+  );
+
+  if (meaningfulChars.length < 4) return false;
+
+  const lowered = t.toLowerCase().trim();
 
   const lowSignal = new Set([
     "ok",
@@ -256,10 +266,10 @@ function shouldAttemptLanguageDetection(text: string) {
     "merci",
     "grazie",
     "thanks",
-    "thankyou",
+    "thank you",
   ]);
 
-  return !lowSignal.has(stripped);
+  return !lowSignal.has(lowered);
 }
 
 async function backfillBookingGuestLanguages(params: {
