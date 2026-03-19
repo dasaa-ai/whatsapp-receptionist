@@ -108,17 +108,146 @@ function normalizeLang(lang?: string | null): string | null {
   return null;
 }
 
-async function detectGuestLanguage(text: string): Promise<string> {
-  const t = (text || "").toLowerCase();
+async function detectGuestLanguage(
+  text: string
+): Promise<{ language: string; confidence: number; source: "rule_based" | "openai" | "fallback" }> {
+  const t = (text || "").trim().toLowerCase();
 
-  if (/[àèéìòù]/.test(t) || t.includes("ciao") || t.includes("grazie")) {
-    return "it";
+  if (!t) {
+    return { language: "en", confidence: 0.2, source: "fallback" };
   }
-  if (t.includes("hola") || t.includes("gracias")) return "es";
-  if (t.includes("bonjour") || t.includes("merci")) return "fr";
 
-  return "en";
+  // Strong rule-based checks first
+  if (/[àèéìòù]/.test(t) || t.includes("ciao") || t.includes("grazie") || t.includes("buongiorno")) {
+    return { language: "it", confidence: 0.92, source: "rule_based" };
+  }
+  if (t.includes("hola") || t.includes("gracias") || t.includes("buenas")) {
+    return { language: "es", confidence: 0.92, source: "rule_based" };
+  }
+  if (t.includes("bonjour") || t.includes("merci") || t.includes("bonsoir")) {
+    return { language: "fr", confidence: 0.92, source: "rule_based" };
+  }
+  if (t.includes("hallo") || t.includes("danke") || t.includes("guten tag")) {
+    return { language: "de", confidence: 0.92, source: "rule_based" };
+  }
+  if (t.includes("olá") || t.includes("obrigado") || t.includes("obrigada")) {
+    return { language: "pt", confidence: 0.92, source: "rule_based" };
+  }
+
+  // Avoid over-detecting on tiny messages like "ok", "yes", "hi"
+  const meaningfulText = t.replace(/[0-9\W_]+/g, " ").trim();
+  if (meaningfulText.length < 4) {
+    return { language: "en", confidence: 0.3, source: "fallback" };
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return { language: "en", confidence: 0.4, source: "fallback" };
+  }
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content:
+              'Detect the language of the user message. Return ONLY strict JSON like {"language":"en","confidence":0.98}. Use ISO language codes only. Supported preferred outputs: en, it, es, fr, de, pt. If unsure, return "en" with lower confidence.',
+          },
+          { role: "user", content: text },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      return { language: "en", confidence: 0.4, source: "fallback" };
+    }
+
+    const data: any = await res.json();
+    const raw = data?.choices?.[0]?.message?.content?.trim();
+
+    if (!raw) {
+      return { language: "en", confidence: 0.4, source: "fallback" };
+    }
+
+    const parsed = JSON.parse(raw);
+    const language = normalizeLang(parsed?.language) || "en";
+    const confidence =
+      typeof parsed?.confidence === "number"
+        ? Math.max(0, Math.min(1, parsed.confidence))
+        : 0.7;
+
+    return { language, confidence, source: "openai" };
+  } catch {
+    return { language: "en", confidence: 0.4, source: "fallback" };
+  }
 }
+
+function shouldAttemptLanguageDetection(text: string) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return false;
+
+  const stripped = t.replace(/[0-9\W_]+/g, "");
+  if (stripped.length < 4) return false;
+
+  const lowSignal = new Set([
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "hi",
+    "hey",
+    "yo",
+    "ciao",
+    "hola",
+    "merci",
+    "grazie",
+    "thanks",
+    "thankyou",
+  ]);
+
+  return !lowSignal.has(stripped);
+}
+
+async function backfillBookingGuestLanguages(params: {
+  bookingId: string | null;
+  hostLanguage: string;
+  guestLanguage: string;
+  guestLanguageConfidence: number | null;
+  guestLanguageSource: string;
+}) {
+  const {
+    bookingId,
+    hostLanguage,
+    guestLanguage,
+    guestLanguageConfidence,
+    guestLanguageSource,
+  } = params;
+
+  if (!bookingId) return;
+
+  await supabaseAdmin
+    .from("booking_guests")
+    .update({
+      host_language: hostLanguage,
+      guest_language: guestLanguage,
+      guest_language_confidence: guestLanguageConfidence,
+      guest_language_source: guestLanguageSource,
+      translation_enabled: hostLanguage !== guestLanguage,
+      canonical_language: "en",
+      last_detected_language: guestLanguage,
+      last_detected_at: new Date().toISOString(),
+    })
+    .eq("booking_id", bookingId);
+}
+
 
 async function parseTwilioRequest(
   req: Request
@@ -282,22 +411,26 @@ export async function POST(req: Request) {
     if (!existingConv) {
       const guestNameFallback = profileName?.trim() || "Guest";
 
-      const { data: newConv, error: convCreateErr } = await supabaseAdmin
-        .from("conversations")
-        .insert({
-          property_id: propertyId,
-          guest_phone_e164: guestPhone,
-          guest_name: guestNameFallback,
-          status: "open",
-          stage: "new",
-          role: null,
-          document_status: "not_requested",
-          required_guest_documents: 1,
-          received_guest_documents: 0,
-          verified_guest_documents: 0,
-          id_received: false,
-          last_inbound_at: new Date().toISOString(),
-        })
+      const defaultHostLanguage = "en";
+
+const { data: newConv, error: convCreateErr } = await supabaseAdmin
+  .from("conversations")
+  .insert({
+    property_id: propertyId,
+    guest_phone_e164: guestPhone,
+    guest_name: guestNameFallback,
+    status: "open",
+    stage: "new",
+    role: null,
+    document_status: "not_requested",
+    required_guest_documents: 1,
+    received_guest_documents: 0,
+    verified_guest_documents: 0,
+    id_received: false,
+    host_language: defaultHostLanguage,
+    guest_language: defaultHostLanguage,
+    last_inbound_at: new Date().toISOString(),
+  })
         .select(`
           id,
           stage,
@@ -355,26 +488,57 @@ export async function POST(req: Request) {
       return emptyTwimlResponse();
     }
 
-    let guestLanguage = (existingConv as any)?.guest_language as string | null;
-    if (!guestLanguage && body.trim()) {
-      guestLanguage = await detectGuestLanguage(body);
-      await supabaseAdmin
-        .from("conversations")
-        .update({ guest_language: guestLanguage })
-        .eq("id", conversationId);
-    }
+    let hostLanguage =
+  normalizeLang((existingConv as any)?.host_language) || "en";
 
-    let hostLanguage = (existingConv as any)?.host_language as string | null;
-    if (!hostLanguage) {
-      const looksLikeHostMessage = role === "host";
-      if (looksLikeHostMessage && body.trim()) {
-        hostLanguage = await detectGuestLanguage(body);
-        await supabaseAdmin
-          .from("conversations")
-          .update({ host_language: hostLanguage })
-          .eq("id", conversationId);
-      }
-    }
+let guestLanguage =
+  normalizeLang((existingConv as any)?.guest_language) || hostLanguage;
+
+let guestLanguageConfidence: number | null = null;
+let guestLanguageSource = "host_default";
+
+if (body.trim() && shouldAttemptLanguageDetection(body)) {
+  const detection = await detectGuestLanguage(body);
+
+  guestLanguageConfidence = detection.confidence;
+
+  const shouldSwitchGuestLanguage =
+    !guestLanguage ||
+    guestLanguage === hostLanguage ||
+    detection.confidence >= 0.8;
+
+  if (shouldSwitchGuestLanguage) {
+    guestLanguage = detection.language;
+    guestLanguageSource =
+      detection.source === "openai" ? "detected_openai" : "detected_rule";
+
+    await supabaseAdmin
+      .from("conversations")
+      .update({
+        host_language: hostLanguage,
+        guest_language: guestLanguage,
+        last_inbound_at: new Date().toISOString(),
+      })
+      .eq("id", conversationId);
+  }
+} else {
+  await supabaseAdmin
+    .from("conversations")
+    .update({
+      host_language: hostLanguage,
+      guest_language: guestLanguage,
+      last_inbound_at: new Date().toISOString(),
+    })
+    .eq("id", conversationId);
+}
+
+await backfillBookingGuestLanguages({
+  bookingId,
+  hostLanguage,
+  guestLanguage,
+  guestLanguageConfidence,
+  guestLanguageSource,
+});
 
     const topic = detectTopic(body);
 
