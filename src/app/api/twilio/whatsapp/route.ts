@@ -137,6 +137,13 @@ async function detectGuestLanguage(
 ): Promise<{ language: string; confidence: number; source: "rule_based" | "openai" | "fallback" }> {
   const t = (text || "").trim().toLowerCase();
 
+  console.log("[LANG][INPUT]", { original: text, normalized: t });
+  console.log("[LANG][SCRIPTS]", {
+  devanagari: /[\u0900-\u097F]/.test(t),
+  gurmukhi: /[\u0A00-\u0A7F]/.test(t),
+  odia: /[\u0B00-\u0B7F]/.test(t),
+});
+
   if (!t) {
     return { language: "en", confidence: 0.2, source: "fallback" };
   }
@@ -535,6 +542,12 @@ export async function POST(req: Request) {
 
     if (body.trim() && shouldAttemptLanguageDetection(body)) {
       const detection = await detectGuestLanguage(body);
+      console.log("[LANG][DETECTION_RESULT]", detection);
+console.log("[LANG][BEFORE_UPDATE]", {
+  hostLanguage,
+  guestLanguage,
+  body,
+});
 
       guestLanguageConfidence = detection.confidence;
 
@@ -549,6 +562,14 @@ export async function POST(req: Request) {
           detection.source === "openai" ? "detected_openai" : "detected_rule";
       }
     }
+
+    console.log("[LANG][FINAL_WRITE]", {
+  conversationId,
+  hostLanguage,
+  guestLanguage,
+  guestLanguageConfidence,
+  guestLanguageSource,
+});
 
     await supabaseAdmin
       .from("conversations")
