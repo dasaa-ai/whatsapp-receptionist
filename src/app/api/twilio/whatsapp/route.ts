@@ -146,6 +146,16 @@ async function detectGuestLanguage(
     return { language: "hi", confidence: 0.97, source: "rule_based" };
   }
 
+// Gurmukhi script (Punjabi)
+if (/[\u0A00-\u0A7F]/.test(t)) {
+  return { language: "pa", confidence: 0.97, source: "rule_based" };
+}
+
+// Odia script
+if (/[\u0B00-\u0B7F]/.test(t)) {
+  return { language: "or", confidence: 0.97, source: "rule_based" };
+}
+
   // Strong rule-based checks first
   if (/[àèéìòù]/.test(t) || t.includes("ciao") || t.includes("grazie") || t.includes("buongiorno")) {
     return { language: "it", confidence: 0.92, source: "rule_based" };
@@ -514,8 +524,7 @@ export async function POST(req: Request) {
       return emptyTwimlResponse();
     }
 
-    let hostLanguage =
-      normalizeLang((existingConv as any)?.host_language) || "en";
+    let hostLanguage = "en";
 
     let guestLanguage =
       normalizeLang((existingConv as any)?.guest_language) || hostLanguage;
