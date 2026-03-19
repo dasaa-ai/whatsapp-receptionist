@@ -42,6 +42,52 @@ type TopicKey =
   | "pricing"
   | "general";
 
+function normalizeLang(lang?: string | null): string | null {
+  if (!lang) return null;
+
+  const raw = String(lang).trim().toLowerCase();
+  if (!raw) return null;
+
+  const aliasMap: Record<string, string> = {
+    english: "en",
+    italian: "it",
+    italiano: "it",
+    spanish: "es",
+    espanol: "es",
+    español: "es",
+    french: "fr",
+    francais: "fr",
+    français: "fr",
+    german: "de",
+    deutsch: "de",
+    portuguese: "pt",
+    portugues: "pt",
+    português: "pt",
+    hindi: "hi",
+    punjabi: "pa",
+    odia: "or",
+    oriya: "or",
+  };
+
+  if (aliasMap[raw]) return aliasMap[raw];
+
+  const base = raw.split(/[-_]/)[0];
+
+  if (/^[a-z]{2,3}$/.test(base)) return base;
+
+  if (raw.includes("ital")) return "it";
+  if (raw.includes("engl")) return "en";
+  if (raw.includes("span")) return "es";
+  if (raw.includes("fren")) return "fr";
+  if (raw.includes("germ") || raw.includes("deut")) return "de";
+  if (raw.includes("port")) return "pt";
+  if (raw.includes("hind")) return "hi";
+  if (raw.includes("punj")) return "pa";
+  if (raw.includes("odia") || raw.includes("oriya")) return "or";
+
+  return null;
+}
+
 async function translateIfNeeded(
   text: string,
   guestLanguage: string | null | undefined
@@ -68,7 +114,7 @@ async function translateIfNeeded(
             role: "system",
             content:
               `You translate short hospitality guest-support messages. Translate into language code "${lang}". ` +
-              `Rules: keep meaning exactly; keep emojis; keep times/dates/numbers unchanged; do not add extra explanation. ` +
+              `Rules: keep meaning exactly; keep emojis; keep times/dates/numbers unchanged; preserve the natural script for that language; do not add extra explanation. ` +
               `Return ONLY the translated text.`,
           },
           { role: "user", content: text },
@@ -86,28 +132,6 @@ async function translateIfNeeded(
   }
 }
 
-function normalizeLang(lang?: string | null): string | null {
-  if (!lang) return null;
-  const l = lang.trim().toLowerCase();
-  if (!l) return null;
-
-  if (l === "en" || l.startsWith("en")) return "en";
-  if (l === "it" || l.startsWith("it")) return "it";
-  if (l === "es" || l.startsWith("es")) return "es";
-  if (l === "fr" || l.startsWith("fr")) return "fr";
-  if (l === "de" || l.startsWith("de")) return "de";
-  if (l === "pt" || l.startsWith("pt")) return "pt";
-
-  if (l.includes("ital")) return "it";
-  if (l.includes("engl")) return "en";
-  if (l.includes("span")) return "es";
-  if (l.includes("fren")) return "fr";
-  if (l.includes("germ") || l.includes("deut")) return "de";
-  if (l.includes("port")) return "pt";
-
-  return null;
-}
-
 async function detectGuestLanguage(
   text: string
 ): Promise<{ language: string; confidence: number; source: "rule_based" | "openai" | "fallback" }> {
@@ -115,6 +139,11 @@ async function detectGuestLanguage(
 
   if (!t) {
     return { language: "en", confidence: 0.2, source: "fallback" };
+  }
+
+  // Fast-path: Devanagari script (Hindi, Marathi, Nepali, etc.)
+  if (/[\u0900-\u097F]/.test(t)) {
+    return { language: "hi", confidence: 0.97, source: "rule_based" };
   }
 
   // Strong rule-based checks first
@@ -159,7 +188,7 @@ async function detectGuestLanguage(
           {
             role: "system",
             content:
-              'Detect the language of the user message. Return ONLY strict JSON like {"language":"en","confidence":0.98}. Use ISO language codes only. Supported preferred outputs: en, it, es, fr, de, pt. If unsure, return "en" with lower confidence.',
+              'Detect the language of the user message. Return ONLY strict JSON like {"language":"hi","confidence":0.98}. Use an ISO 639-1 language code when possible. Detect the actual language of the message from any language/script. If unsure, return "en" with lower confidence.',
           },
           { role: "user", content: text },
         ],
@@ -247,7 +276,6 @@ async function backfillBookingGuestLanguages(params: {
     })
     .eq("booking_id", bookingId);
 }
-
 
 async function parseTwilioRequest(
   req: Request
@@ -410,27 +438,26 @@ export async function POST(req: Request) {
 
     if (!existingConv) {
       const guestNameFallback = profileName?.trim() || "Guest";
-
       const defaultHostLanguage = "en";
 
-const { data: newConv, error: convCreateErr } = await supabaseAdmin
-  .from("conversations")
-  .insert({
-    property_id: propertyId,
-    guest_phone_e164: guestPhone,
-    guest_name: guestNameFallback,
-    status: "open",
-    stage: "new",
-    role: null,
-    document_status: "not_requested",
-    required_guest_documents: 1,
-    received_guest_documents: 0,
-    verified_guest_documents: 0,
-    id_received: false,
-    host_language: defaultHostLanguage,
-    guest_language: defaultHostLanguage,
-    last_inbound_at: new Date().toISOString(),
-  })
+      const { data: newConv, error: convCreateErr } = await supabaseAdmin
+        .from("conversations")
+        .insert({
+          property_id: propertyId,
+          guest_phone_e164: guestPhone,
+          guest_name: guestNameFallback,
+          status: "open",
+          stage: "new",
+          role: null,
+          document_status: "not_requested",
+          required_guest_documents: 1,
+          received_guest_documents: 0,
+          verified_guest_documents: 0,
+          id_received: false,
+          host_language: defaultHostLanguage,
+          guest_language: defaultHostLanguage,
+          last_inbound_at: new Date().toISOString(),
+        })
         .select(`
           id,
           stage,
@@ -466,7 +493,6 @@ const { data: newConv, error: convCreateErr } = await supabaseAdmin
     const role = (existingConv.role as string) || null;
     const bookingId = (existingConv as any)?.booking_id ?? null;
 
-    // Idempotency: if inbound message already logged, do not process again.
     const { count: existingInboundMessageCount, error: existingInboundMessageErr } =
       await supabaseAdmin
         .from("messages")
@@ -489,28 +515,31 @@ const { data: newConv, error: convCreateErr } = await supabaseAdmin
     }
 
     let hostLanguage =
-  normalizeLang((existingConv as any)?.host_language) || "en";
+      normalizeLang((existingConv as any)?.host_language) || "en";
 
-let guestLanguage =
-  normalizeLang((existingConv as any)?.guest_language) || hostLanguage;
+    let guestLanguage =
+      normalizeLang((existingConv as any)?.guest_language) || hostLanguage;
 
-let guestLanguageConfidence: number | null = null;
-let guestLanguageSource = "host_default";
+    let guestLanguageConfidence: number | null = null;
+    let guestLanguageSource =
+      normalizeLang((existingConv as any)?.guest_language) ? "existing" : "host_default";
 
-if (body.trim() && shouldAttemptLanguageDetection(body)) {
-  const detection = await detectGuestLanguage(body);
+    if (body.trim() && shouldAttemptLanguageDetection(body)) {
+      const detection = await detectGuestLanguage(body);
 
-  guestLanguageConfidence = detection.confidence;
+      guestLanguageConfidence = detection.confidence;
 
-  const shouldSwitchGuestLanguage =
-    !guestLanguage ||
-    guestLanguage === hostLanguage ||
-    detection.confidence >= 0.8;
+      const shouldSwitchGuestLanguage =
+        !guestLanguage ||
+        guestLanguage === hostLanguage ||
+        detection.confidence >= 0.8;
 
-  if (shouldSwitchGuestLanguage) {
-    guestLanguage = detection.language;
-    guestLanguageSource =
-      detection.source === "openai" ? "detected_openai" : "detected_rule";
+      if (shouldSwitchGuestLanguage) {
+        guestLanguage = detection.language;
+        guestLanguageSource =
+          detection.source === "openai" ? "detected_openai" : "detected_rule";
+      }
+    }
 
     await supabaseAdmin
       .from("conversations")
@@ -520,25 +549,14 @@ if (body.trim() && shouldAttemptLanguageDetection(body)) {
         last_inbound_at: new Date().toISOString(),
       })
       .eq("id", conversationId);
-  }
-} else {
-  await supabaseAdmin
-    .from("conversations")
-    .update({
-      host_language: hostLanguage,
-      guest_language: guestLanguage,
-      last_inbound_at: new Date().toISOString(),
-    })
-    .eq("id", conversationId);
-}
 
-await backfillBookingGuestLanguages({
-  bookingId,
-  hostLanguage,
-  guestLanguage,
-  guestLanguageConfidence,
-  guestLanguageSource,
-});
+    await backfillBookingGuestLanguages({
+      bookingId,
+      hostLanguage,
+      guestLanguage,
+      guestLanguageConfidence,
+      guestLanguageSource,
+    });
 
     const topic = detectTopic(body);
 
@@ -603,6 +621,7 @@ await backfillBookingGuestLanguages({
     }
 
     const receivedGuestDocuments = existingDocumentCount ?? 0;
+
     const idReceived =
       receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
 
@@ -615,7 +634,6 @@ await backfillBookingGuestLanguages({
       );
 
     if (requiresIdUpload) {
-      // Extra idempotency protection for document uploads.
       const { count: existingDocForMessageCount, error: existingDocForMessageErr } =
         await supabaseAdmin
           .from("guest_documents")
@@ -736,7 +754,6 @@ await backfillBookingGuestLanguages({
       let replyText = "";
 
       if (successCount > 0) {
-        // Mark next missing required guests as received.
         if (bookingId) {
           const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
             .from("booking_guests")
@@ -977,4 +994,3 @@ export async function GET() {
     note: "Twilio WhatsApp webhook endpoint. Use POST from Twilio.",
   });
 }
-
