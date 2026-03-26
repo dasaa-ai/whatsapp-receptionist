@@ -324,9 +324,12 @@ export default function ConversationDetailPage() {
                   <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
                     Mark as priority
                   </button>
-                  <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
-                    Open documents
-                  </button>
+                  <Link
+  href={`/dashboard/${detail.id}/documents`}
+  className="block rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm"
+>
+  Open documents
+</Link>
                   <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
                     Booking: {detail.bookingId ? detail.bookingId.slice(0, 8) : "N/A"}
                   </button>
