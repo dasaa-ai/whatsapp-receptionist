@@ -4,6 +4,7 @@ export type ConversationMessage = {
   id: string;
   direction: "inbound" | "outbound";
   body: string;
+  translatedBody: string | null;
   created_at: string;
 };
 
@@ -22,7 +23,9 @@ export type ConversationDetail = {
   messages: ConversationMessage[];
 };
 
-export async function getConversationDetail(conversationId: string): Promise<ConversationDetail | null> {
+export async function getConversationDetail(
+  conversationId: string
+): Promise<ConversationDetail | null> {
   const convoRes = await supabaseAdmin
     .from("conversations")
     .select(`
@@ -85,7 +88,7 @@ export async function getConversationDetail(conversationId: string): Promise<Con
 
   const messagesRes = await supabaseAdmin
     .from("messages")
-    .select("id, direction, body, created_at")
+    .select("id, direction, body, translated_body, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
 
@@ -95,10 +98,7 @@ export async function getConversationDetail(conversationId: string): Promise<Con
 
   return {
     id: conversation.id,
-    guestName:
-      conversation.guest_name ||
-      booking?.lead_guest_name ||
-      "Guest",
+    guestName: conversation.guest_name || booking?.lead_guest_name || "Guest",
     guestLanguage: (conversation.guest_language || "en").toUpperCase(),
     hostLanguage: (conversation.host_language || "en").toUpperCase(),
     stage: conversation.stage || "active",
@@ -112,6 +112,7 @@ export async function getConversationDetail(conversationId: string): Promise<Con
       id: m.id,
       direction: m.direction,
       body: m.body || "",
+      translatedBody: m.translated_body || null,
       created_at: m.created_at,
     })),
   };

@@ -67,6 +67,7 @@ function normalizeLang(lang?: string | null): string | null {
     punjabi: "pa",
     odia: "or",
     oriya: "or",
+    russian: "ru",
   };
 
   if (aliasMap[raw]) return aliasMap[raw];
@@ -84,17 +85,24 @@ function normalizeLang(lang?: string | null): string | null {
   if (raw.includes("hind")) return "hi";
   if (raw.includes("punj")) return "pa";
   if (raw.includes("odia") || raw.includes("oriya")) return "or";
+  if (raw.includes("russ")) return "ru";
 
   return null;
 }
 
-async function translateIfNeeded(
-  text: string,
-  guestLanguage: string | null | undefined
-) {
-  const lang = normalizeLang(guestLanguage);
-  if (!text?.trim()) return text;
-  if (!lang || lang === "en") return text;
+async function translateBetweenLanguages(params: {
+  text: string;
+  targetLanguage: string | null | undefined;
+  sourceLanguage?: string | null | undefined;
+}) {
+  const text = params.text?.trim() || "";
+  const target = normalizeLang(params.targetLanguage);
+  const source = normalizeLang(params.sourceLanguage) || "auto";
+
+  if (!text) return text;
+  if (!target) return text;
+  if (target === "en" && source === "en") return text;
+  if (source !== "auto" && target === source) return text;
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return text;
@@ -113,9 +121,9 @@ async function translateIfNeeded(
           {
             role: "system",
             content:
-              `You translate short hospitality guest-support messages. Translate into language code "${lang}". ` +
-              `Rules: keep meaning exactly; keep emojis; keep times/dates/numbers unchanged; preserve the natural script for that language; do not add extra explanation. ` +
-              `Return ONLY the translated text.`,
+              `You translate short hospitality guest-support messages. Translate into language code "${target}". ` +
+              `Source language is "${source}". ` +
+              `Rules: keep meaning exactly; keep emojis; keep times/dates/numbers unchanged; preserve the natural script for that language; do not add explanation; return ONLY translated text.`,
           },
           { role: "user", content: text },
         ],
@@ -132,6 +140,14 @@ async function translateIfNeeded(
   }
 }
 
+async function translateIfNeeded(text: string, guestLanguage: string | null | undefined) {
+  return translateBetweenLanguages({
+    text,
+    targetLanguage: guestLanguage,
+    sourceLanguage: "en",
+  });
+}
+
 async function detectGuestLanguage(
   text: string
 ): Promise<{ language: string; confidence: number; source: "rule_based" | "openai" | "fallback" }> {
@@ -139,32 +155,27 @@ async function detectGuestLanguage(
 
   console.log("[LANG][INPUT]", { original: text, normalized: t });
   console.log("[LANG][SCRIPTS]", {
-  devanagariLetters: /[\u0904-\u0939\u0958-\u0961]/.test(t),
-  gurmukhiLetters: /[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t),
-  odiaLetters: /[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t),
-});
+    devanagariLetters: /[\u0904-\u0939\u0958-\u0961]/.test(t),
+    gurmukhiLetters: /[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t),
+    odiaLetters: /[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t),
+  });
 
   if (!t) {
     return { language: "en", confidence: 0.2, source: "fallback" };
   }
 
-// Gurmukhi script (Punjabi) - check before Devanagari
-if (/[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t)) {
-  return { language: "pa", confidence: 0.97, source: "rule_based" };
-}
+  if (/[\u0A05-\u0A39\u0A59-\u0A5E\u0A72-\u0A74]/.test(t)) {
+    return { language: "pa", confidence: 0.97, source: "rule_based" };
+  }
 
-// Odia script - check before Devanagari
-if (/[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t)) {
-  return { language: "or", confidence: 0.97, source: "rule_based" };
-}
+  if (/[\u0B05-\u0B39\u0B5C-\u0B5D\u0B5F-\u0B61]/.test(t)) {
+    return { language: "or", confidence: 0.97, source: "rule_based" };
+  }
 
-// Devanagari letters (Hindi/Marathi/Nepali etc.)
-// Avoid matching only punctuation like "।"
-if (/[\u0904-\u0939\u0958-\u0961]/.test(t)) {
-  return { language: "hi", confidence: 0.97, source: "rule_based" };
-}
+  if (/[\u0904-\u0939\u0958-\u0961]/.test(t)) {
+    return { language: "hi", confidence: 0.97, source: "rule_based" };
+  }
 
-  // Strong rule-based checks first
   if (/[àèéìòù]/.test(t) || t.includes("ciao") || t.includes("grazie") || t.includes("buongiorno")) {
     return { language: "it", confidence: 0.92, source: "rule_based" };
   }
@@ -181,15 +192,11 @@ if (/[\u0904-\u0939\u0958-\u0961]/.test(t)) {
     return { language: "pt", confidence: 0.92, source: "rule_based" };
   }
 
-  // Avoid over-detecting on tiny messages like "ok", "yes", "hi"
-  
-  const meaningfulChars = Array.from(t).filter((ch) =>
-  /\p{L}|\p{N}/u.test(ch)
-);
+  const meaningfulChars = Array.from(t).filter((ch) => /\p{L}|\p{N}/u.test(ch));
 
-if (meaningfulChars.length < 4) {
-  return { language: "en", confidence: 0.3, source: "fallback" };
-}
+  if (meaningfulChars.length < 4) {
+    return { language: "en", confidence: 0.3, source: "fallback" };
+  }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -245,10 +252,7 @@ function shouldAttemptLanguageDetection(text: string) {
   const t = (text || "").trim();
   if (!t) return false;
 
-  // Count Unicode letters/numbers across all scripts
-  const meaningfulChars = Array.from(t).filter((ch) =>
-    /\p{L}|\p{N}/u.test(ch)
-  );
+  const meaningfulChars = Array.from(t).filter((ch) => /\p{L}|\p{N}/u.test(ch));
 
   if (meaningfulChars.length < 4) return false;
 
@@ -542,7 +546,8 @@ export async function POST(req: Request) {
       return emptyTwimlResponse();
     }
 
-    let hostLanguage = "en";
+    let hostLanguage =
+      normalizeLang((existingConv as any)?.host_language) || "en";
 
     let guestLanguage =
       normalizeLang((existingConv as any)?.guest_language) || hostLanguage;
@@ -554,11 +559,11 @@ export async function POST(req: Request) {
     if (body.trim() && shouldAttemptLanguageDetection(body)) {
       const detection = await detectGuestLanguage(body);
       console.log("[LANG][DETECTION_RESULT]", detection);
-console.log("[LANG][BEFORE_UPDATE]", {
-  hostLanguage,
-  guestLanguage,
-  body,
-});
+      console.log("[LANG][BEFORE_UPDATE]", {
+        hostLanguage,
+        guestLanguage,
+        body,
+      });
 
       guestLanguageConfidence = detection.confidence;
 
@@ -575,12 +580,12 @@ console.log("[LANG][BEFORE_UPDATE]", {
     }
 
     console.log("[LANG][FINAL_WRITE]", {
-  conversationId,
-  hostLanguage,
-  guestLanguage,
-  guestLanguageConfidence,
-  guestLanguageSource,
-});
+      conversationId,
+      hostLanguage,
+      guestLanguage,
+      guestLanguageConfidence,
+      guestLanguageSource,
+    });
 
     await supabaseAdmin
       .from("conversations")
@@ -601,10 +606,28 @@ console.log("[LANG][BEFORE_UPDATE]", {
 
     const topic = detectTopic(body);
 
+    const rawInboundBody =
+      body || `[media message with ${mediaItems.length} attachment(s)]`;
+
+    let hostVisibleInboundBody = rawInboundBody;
+    let inboundTranslatedBody: string | null = null;
+
+    if (!isHostInitiated && body.trim()) {
+      const translatedForHost = await translateBetweenLanguages({
+        text: body,
+        targetLanguage: hostLanguage,
+        sourceLanguage: guestLanguage,
+      });
+
+      hostVisibleInboundBody = translatedForHost || body;
+      inboundTranslatedBody = body;
+    }
+
     const { error: inboundErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       direction: "inbound",
-      body: body || `[media message with ${mediaItems.length} attachment(s)]`,
+      body: hostVisibleInboundBody,
+      translated_body: inboundTranslatedBody,
       topic,
       provider: "twilio",
       provider_message_id: messageSid,
@@ -709,18 +732,19 @@ console.log("[LANG][BEFORE_UPDATE]", {
 
         const remaining = Math.max(requiredGuestDocuments - receivedGuestDocuments, 0);
 
-        const reminderReply = await translateIfNeeded(
+        const hostVisibleReply =
           remaining > 1
             ? `To continue check-in, please send the remaining ${remaining} guest ID documents here on WhatsApp. Accepted formats: JPG, PNG, PDF.`
-            : `To continue check-in, please send the remaining guest ID document here on WhatsApp. Accepted formats: JPG, PNG, PDF.`,
-          guestLanguage
-        );
+            : `To continue check-in, please send the remaining guest ID document here on WhatsApp. Accepted formats: JPG, PNG, PDF.`;
+
+        const guestVisibleReply = await translateIfNeeded(hostVisibleReply, guestLanguage);
 
         const outboundProviderMsgId = `local-reply-${messageSid}`;
         await supabaseAdmin.from("messages").insert({
           conversation_id: conversationId,
           direction: "outbound",
-          body: reminderReply,
+          body: hostVisibleReply,
+          translated_body: guestVisibleReply,
           topic: "general",
           provider: "twilio",
           provider_message_id: outboundProviderMsgId,
@@ -730,7 +754,7 @@ console.log("[LANG][BEFORE_UPDATE]", {
         const twiml =
           `<?xml version="1.0" encoding="UTF-8"?>` +
           `<Response>` +
-          `<Message>${xmlEscape(reminderReply)}</Message>` +
+          `<Message>${xmlEscape(guestVisibleReply)}</Message>` +
           `</Response>`;
 
         return new Response(twiml, {
@@ -883,13 +907,14 @@ console.log("[LANG][BEFORE_UPDATE]", {
           "We could not process your document yet. To continue check-in, please send a clear photo of your ID or passport here on WhatsApp in JPG, PNG, or PDF format.";
       }
 
-      const translatedReply = await translateIfNeeded(replyText, guestLanguage);
+      const guestVisibleReply = await translateIfNeeded(replyText, guestLanguage);
 
       const outboundProviderMsgId = `local-reply-${messageSid}`;
       const { error: outboundErr } = await supabaseAdmin.from("messages").insert({
         conversation_id: conversationId,
         direction: "outbound",
-        body: translatedReply,
+        body: replyText,
+        translated_body: guestVisibleReply,
         topic: "general",
         provider: "twilio",
         provider_message_id: outboundProviderMsgId,
@@ -905,7 +930,7 @@ console.log("[LANG][BEFORE_UPDATE]", {
       const twiml =
         `<?xml version="1.0" encoding="UTF-8"?>` +
         `<Response>` +
-        `<Message>${xmlEscape(translatedReply)}</Message>` +
+        `<Message>${xmlEscape(guestVisibleReply)}</Message>` +
         `</Response>`;
 
       return new Response(twiml, {
@@ -988,18 +1013,20 @@ console.log("[LANG][BEFORE_UPDATE]", {
     }
 
     const effectiveRole = (nextRole ?? role) as string | null;
-    let finalReplyText = replyText;
     const targetLang = effectiveRole === "host" ? hostLanguage : guestLanguage;
 
-    if (targetLang && targetLang !== "en") {
-      finalReplyText = await translateIfNeeded(replyText, targetLang);
-    }
+    const hostVisibleReplyText = replyText;
+    const guestVisibleReplyText =
+      targetLang && targetLang !== "en"
+        ? await translateIfNeeded(replyText, targetLang)
+        : replyText;
 
     const outboundProviderMsgId = `local-reply-${messageSid}`;
     const { error: outboundErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       direction: "outbound",
-      body: finalReplyText,
+      body: hostVisibleReplyText,
+      translated_body: guestVisibleReplyText,
       topic,
       provider: "twilio",
       provider_message_id: outboundProviderMsgId,
@@ -1015,7 +1042,7 @@ console.log("[LANG][BEFORE_UPDATE]", {
     const twiml =
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
-      `<Message>${xmlEscape(finalReplyText)}</Message>` +
+      `<Message>${xmlEscape(guestVisibleReplyText)}</Message>` +
       `</Response>`;
 
     return new Response(twiml, {

@@ -8,6 +8,7 @@ type Message = {
   id: string;
   direction: "inbound" | "outbound";
   body: string;
+  translatedBody: string | null;
   created_at: string;
 };
 
@@ -183,9 +184,7 @@ export default function ConversationDetailPage() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <p className="text-sm text-slate-500">Dashboard / Conversation</p>
-            <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-              {detail.guestName}
-            </h1>
+            <h1 className="mt-1 text-3xl font-semibold tracking-tight">{detail.guestName}</h1>
             <p className="mt-2 text-slate-600">{detail.propertyName}</p>
           </div>
 
@@ -325,11 +324,11 @@ export default function ConversationDetailPage() {
                     Mark as priority
                   </button>
                   <Link
-  href={`/dashboard/${detail.id}/documents`}
-  className="block rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm"
->
-  Open documents
-</Link>
+                    href={`/dashboard/${detail.id}/documents`}
+                    className="block rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm"
+                  >
+                    Open documents
+                  </Link>
                   <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
                     Booking: {detail.bookingId ? detail.bookingId.slice(0, 8) : "N/A"}
                   </button>
