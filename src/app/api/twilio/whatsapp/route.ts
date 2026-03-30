@@ -380,7 +380,9 @@ async function claimAutoReplyCooldownLock(params: {
 }) {
   const now = new Date();
   const nowIso = now.toISOString();
-  const lockedUntil = new Date(now.getTime() + params.cooldownSeconds * 1000).toISOString();
+  const lockedUntil = new Date(
+    now.getTime() + params.cooldownSeconds * 1000
+  ).toISOString();
 
   const { data, error } = await supabaseAdmin
     .from("conversations")
@@ -393,8 +395,8 @@ async function claimAutoReplyCooldownLock(params: {
     .maybeSingle();
 
   if (error) {
-    console.error("[COOLDOWN][LOCK_ERROR]", error);
-    return false;
+    console.error("[COOLDOWN][LOCK_ERROR][FAIL_OPEN]", error);
+    return true;
   }
 
   const acquired = !!data;
@@ -403,6 +405,11 @@ async function claimAutoReplyCooldownLock(params: {
     console.log("[COOLDOWN][SKIPPED]", {
       conversationId: params.conversationId,
       cooldownSeconds: params.cooldownSeconds,
+    });
+  } else {
+    console.log("[COOLDOWN][ACQUIRED]", {
+      conversationId: params.conversationId,
+      lockedUntil,
     });
   }
 
