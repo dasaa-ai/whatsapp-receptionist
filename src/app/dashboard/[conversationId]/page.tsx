@@ -68,6 +68,18 @@ function renderMessageBody(text: string) {
   );
 }
 
+function getLanguageLabel(direction: "inbound" | "outbound", guestLanguage: string) {
+  return direction === "inbound"
+    ? `Received from guest in ${guestLanguage}`
+    : `Sent to guest in ${guestLanguage}`;
+}
+
+function shouldShowSecondaryLine(message: Message) {
+  if (!message.translatedBody) return false;
+  if (looksLikeFileMessage(message.body)) return false;
+  return message.translatedBody.trim() !== message.body.trim();
+}
+
 export default function ConversationDetailPage() {
   const params = useParams();
   const conversationId = params?.conversationId as string;
@@ -213,6 +225,11 @@ export default function ConversationDetailPage() {
               ) : (
                 detail.messages.map((message) => {
                   const isOutbound = message.direction === "outbound";
+                  const showSecondaryLine = shouldShowSecondaryLine(message);
+                  const languageLabel = getLanguageLabel(
+                    message.direction,
+                    detail.guestLanguage
+                  );
 
                   return (
                     <div key={message.id}>
@@ -223,7 +240,34 @@ export default function ConversationDetailPage() {
                             : "max-w-[75%] rounded-3xl rounded-bl-md bg-slate-100 px-4 py-3 text-sm text-slate-800"
                         }
                       >
+                        <div
+                          className={
+                            isOutbound
+                              ? "mb-2 inline-flex rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-medium text-slate-200"
+                              : "mb-2 inline-flex rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-600"
+                          }
+                        >
+                          {languageLabel}
+                        </div>
+
                         {renderMessageBody(message.body)}
+
+                        {showSecondaryLine && (
+                          <div
+                            className={
+                              isOutbound
+                                ? "mt-3 border-t border-white/10 pt-3 text-xs text-slate-300"
+                                : "mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500"
+                            }
+                          >
+                            <p className="mb-1 font-medium">
+                              {isOutbound ? "Sent to guest as:" : "Original guest text:"}
+                            </p>
+                            <p className="whitespace-pre-wrap break-words">
+                              {message.translatedBody}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
                       <p
