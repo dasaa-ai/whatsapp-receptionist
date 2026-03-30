@@ -378,28 +378,17 @@ async function claimAutoReplyCooldownLock(params: {
   conversationId: string;
   cooldownSeconds: number;
 }) {
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const lockedUntil = new Date(
-    now.getTime() + params.cooldownSeconds * 1000
-  ).toISOString();
-
-  const { data, error } = await supabaseAdmin
-    .from("conversations")
-    .update({
-      auto_reply_locked_until: lockedUntil,
-    })
-    .eq("id", params.conversationId)
-    .or(`auto_reply_locked_until.is.null,auto_reply_locked_until.lt.${nowIso}`)
-    .select("id, auto_reply_locked_until")
-    .maybeSingle();
+  const { data, error } = await supabaseAdmin.rpc("claim_auto_reply_lock", {
+    p_conversation_id: params.conversationId,
+    p_cooldown_seconds: params.cooldownSeconds,
+  });
 
   if (error) {
-    console.error("[COOLDOWN][LOCK_ERROR][FAIL_OPEN]", error);
+    console.error("[COOLDOWN][RPC_LOCK_ERROR][FAIL_OPEN]", error);
     return true;
   }
 
-  const acquired = !!data;
+  const acquired = data === true;
 
   if (!acquired) {
     console.log("[COOLDOWN][SKIPPED]", {
@@ -409,7 +398,7 @@ async function claimAutoReplyCooldownLock(params: {
   } else {
     console.log("[COOLDOWN][ACQUIRED]", {
       conversationId: params.conversationId,
-      lockedUntil,
+      cooldownSeconds: params.cooldownSeconds,
     });
   }
 
