@@ -10,6 +10,8 @@ import { uploadGuestDocument } from "@/lib/uploadGuestDocument";
 
 export const runtime = "nodejs";
 
+const AUTO_REPLY_COOLDOWN_SECONDS = 25;
+
 function xmlEscape(s: string) {
   return s
     .replaceAll("&", "&amp;")
@@ -370,6 +372,59 @@ function inferRoleChoice(body: string): "guest" | "host" | null {
   if (t === "1" || t.includes("guest")) return "guest";
   if (t === "2" || t.includes("host") || t.includes("owner")) return "host";
   return null;
+}
+
+async function getRecentOutboundAutoReply(params: {
+  conversationId: string;
+}): Promise<{ created_at: string | null; provider_message_id: string | null } | null> {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("created_at, provider_message_id")
+    .eq("conversation_id", params.conversationId)
+    .eq("direction", "outbound")
+    .eq("provider", "twilio")
+    .like("provider_message_id", "local-reply-%")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Error checking recent outbound auto-reply:", error);
+    return null;
+  }
+
+  return data || null;
+}
+
+async function isAutoReplyCooldownActive(params: {
+  conversationId: string;
+  cooldownSeconds: number;
+}) {
+  const recent = await getRecentOutboundAutoReply({
+    conversationId: params.conversationId,
+  });
+
+  if (!recent?.created_at) return false;
+
+  const lastReplyTime = new Date(recent.created_at).getTime();
+  const now = Date.now();
+
+  if (Number.isNaN(lastReplyTime)) return false;
+
+  const elapsedSeconds = Math.floor((now - lastReplyTime) / 1000);
+
+  const isActive = elapsedSeconds >= 0 && elapsedSeconds < params.cooldownSeconds;
+
+  if (isActive) {
+    console.log("[COOLDOWN][ACTIVE]", {
+      conversationId: params.conversationId,
+      elapsedSeconds,
+      cooldownSeconds: params.cooldownSeconds,
+      providerMessageId: recent.provider_message_id,
+    });
+  }
+
+  return isActive;
 }
 
 const TOPIC_REPLIES: Record<TopicKey, string> = {
@@ -937,6 +992,18 @@ export async function POST(req: Request) {
         status: 200,
         headers: { "Content-Type": "text/xml" },
       });
+    }
+
+    const autoReplyCooldownActive =
+      !isHostInitiated &&
+      !hasMedia &&
+      await isAutoReplyCooldownActive({
+        conversationId,
+        cooldownSeconds: AUTO_REPLY_COOLDOWN_SECONDS,
+      });
+
+    if (autoReplyCooldownActive) {
+      return emptyTwimlResponse();
     }
 
     let replyText = "";
