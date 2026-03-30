@@ -374,57 +374,39 @@ function inferRoleChoice(body: string): "guest" | "host" | null {
   return null;
 }
 
-async function getRecentOutboundAutoReply(params: {
-  conversationId: string;
-}): Promise<{ created_at: string | null; provider_message_id: string | null } | null> {
-  const { data, error } = await supabaseAdmin
-    .from("messages")
-    .select("created_at, provider_message_id")
-    .eq("conversation_id", params.conversationId)
-    .eq("direction", "outbound")
-    .eq("provider", "twilio")
-    .like("provider_message_id", "local-reply-%")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Error checking recent outbound auto-reply:", error);
-    return null;
-  }
-
-  return data || null;
-}
-
-async function isAutoReplyCooldownActive(params: {
+async function claimAutoReplyCooldownLock(params: {
   conversationId: string;
   cooldownSeconds: number;
 }) {
-  const recent = await getRecentOutboundAutoReply({
-    conversationId: params.conversationId,
-  });
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const lockedUntil = new Date(now.getTime() + params.cooldownSeconds * 1000).toISOString();
 
-  if (!recent?.created_at) return false;
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .update({
+      auto_reply_locked_until: lockedUntil,
+    })
+    .eq("id", params.conversationId)
+    .or(`auto_reply_locked_until.is.null,auto_reply_locked_until.lt.${nowIso}`)
+    .select("id, auto_reply_locked_until")
+    .maybeSingle();
 
-  const lastReplyTime = new Date(recent.created_at).getTime();
-  const now = Date.now();
+  if (error) {
+    console.error("[COOLDOWN][LOCK_ERROR]", error);
+    return false;
+  }
 
-  if (Number.isNaN(lastReplyTime)) return false;
+  const acquired = !!data;
 
-  const elapsedSeconds = Math.floor((now - lastReplyTime) / 1000);
-
-  const isActive = elapsedSeconds >= 0 && elapsedSeconds < params.cooldownSeconds;
-
-  if (isActive) {
-    console.log("[COOLDOWN][ACTIVE]", {
+  if (!acquired) {
+    console.log("[COOLDOWN][SKIPPED]", {
       conversationId: params.conversationId,
-      elapsedSeconds,
       cooldownSeconds: params.cooldownSeconds,
-      providerMessageId: recent.provider_message_id,
     });
   }
 
-  return isActive;
+  return acquired;
 }
 
 const TOPIC_REPLIES: Record<TopicKey, string> = {
@@ -994,16 +976,17 @@ export async function POST(req: Request) {
       });
     }
 
-    const autoReplyCooldownActive =
-      !isHostInitiated &&
-      !hasMedia &&
-      await isAutoReplyCooldownActive({
+    const shouldApplyCooldown = !isHostInitiated && !hasMedia;
+
+    if (shouldApplyCooldown) {
+      const acquired = await claimAutoReplyCooldownLock({
         conversationId,
         cooldownSeconds: AUTO_REPLY_COOLDOWN_SECONDS,
       });
 
-    if (autoReplyCooldownActive) {
-      return emptyTwimlResponse();
+      if (!acquired) {
+        return emptyTwimlResponse();
+      }
     }
 
     let replyText = "";
