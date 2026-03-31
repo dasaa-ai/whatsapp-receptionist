@@ -489,7 +489,8 @@ export async function POST(req: Request) {
         received_guest_documents,
         verified_guest_documents,
         document_status,
-        id_received
+        id_received,
+        ai_paused
       `)
       .eq("property_id", propertyId)
       .eq("guest_phone_e164", guestPhone)
@@ -535,7 +536,8 @@ export async function POST(req: Request) {
           received_guest_documents,
           verified_guest_documents,
           document_status,
-          id_received
+          id_received,
+          ai_paused
         `)
         .single();
 
@@ -639,11 +641,6 @@ export async function POST(req: Request) {
     });
 
     const topic = detectTopic(body);
-    // 🚫 AI PAUSE: do not send auto replies
-if (!isHostInitiated && aiPaused) {
-  console.log("[AI][PAUSED] Skipping auto-reply for conversation:", conversationId);
-  return emptyTwimlResponse();
-}
 
     const rawInboundBody =
       body || `[media message with ${mediaItems.length} attachment(s)]`;
@@ -976,6 +973,12 @@ if (!isHostInitiated && aiPaused) {
         status: 200,
         headers: { "Content-Type": "text/xml" },
       });
+    }
+
+    // 🚫 AI PAUSE: save inbound, allow document flow above, but skip normal auto-replies
+    if (!isHostInitiated && aiPaused) {
+      console.log("[AI][PAUSED] Skipping normal auto-reply for conversation:", conversationId);
+      return emptyTwimlResponse();
     }
 
     const shouldApplyCooldown = !isHostInitiated && !hasMedia;
