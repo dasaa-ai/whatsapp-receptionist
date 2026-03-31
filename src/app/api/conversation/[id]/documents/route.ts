@@ -39,9 +39,11 @@ export async function GET(_req: Request, context: RouteContext) {
         created_at,
         ai_screening_status,
         ai_screening_notes,
-        ai_screened_at
+        ai_screened_at,
+        deleted_at
       `)
       .eq("conversation_id", id)
+      .is("deleted_at", null)
       .order("created_at", { ascending: false });
 
     if (docsRes.error) {
