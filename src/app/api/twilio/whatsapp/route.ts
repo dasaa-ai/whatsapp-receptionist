@@ -913,12 +913,17 @@ export async function POST(req: Request) {
     const idReceived =
       receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
 
+    // IMPORTANT FIX:
+    // Treat incoming media as document upload whenever the conversation still needs docs.
     const requiresIdUpload =
       !idReceived &&
       (
+        hasMedia ||
         stage === "awaiting_guest_id" ||
         stage === "awaiting_passport" ||
-        stage === "awaiting_checkin_document"
+        stage === "awaiting_checkin_document" ||
+        (existingConv as any)?.document_status === "requested" ||
+        (existingConv as any)?.document_status === "partial"
       );
 
     if (requiresIdUpload) {
@@ -946,6 +951,7 @@ export async function POST(req: Request) {
         await supabaseAdmin
           .from("conversations")
           .update({
+            stage: "awaiting_guest_id",
             required_guest_documents: requiredGuestDocuments,
             received_guest_documents: receivedGuestDocuments,
             id_received: idReceived,
@@ -1052,83 +1058,81 @@ export async function POST(req: Request) {
         }
       }
 
+      let finalReceivedCount = receivedGuestDocuments + successCount;
+
+      if (bookingId && successCount > 0) {
+        const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
+          .from("booking_guests")
+          .select("id, full_name")
+          .eq("booking_id", bookingId)
+          .eq("id_required", true)
+          .eq("id_received", false)
+          .order("created_at", { ascending: true })
+          .limit(successCount);
+
+        if (missingGuestsErr) {
+          console.error("Error fetching missing booking guests:", missingGuestsErr);
+        } else if (missingGuests && missingGuests.length > 0) {
+          const guestIdsToUpdate = missingGuests.map((g) => g.id);
+
+          const { error: guestUpdateErr } = await supabaseAdmin
+            .from("booking_guests")
+            .update({
+              id_received: true,
+              verification_status: "received",
+            })
+            .in("id", guestIdsToUpdate);
+
+          if (guestUpdateErr) {
+            console.error("Error updating booking guests:", guestUpdateErr);
+          } else {
+            console.log("Marked booking guests as received:", guestIdsToUpdate);
+          }
+        }
+
+        const { count: receivedGuestCount, error: receivedGuestCountErr } =
+          await supabaseAdmin
+            .from("booking_guests")
+            .select("*", { count: "exact", head: true })
+            .eq("booking_id", bookingId)
+            .eq("id_required", true)
+            .eq("id_received", true);
+
+        if (receivedGuestCountErr) {
+          console.error(
+            "Error counting received booking guests:",
+            receivedGuestCountErr
+          );
+        } else if (typeof receivedGuestCount === "number") {
+          finalReceivedCount = receivedGuestCount;
+        }
+      }
+
+      const isComplete =
+        finalReceivedCount >= requiredGuestDocuments && requiredGuestDocuments > 0;
+      const remaining = Math.max(requiredGuestDocuments - finalReceivedCount, 0);
+
+      const updatePayload = {
+        stage: isComplete ? "document_received" : "awaiting_guest_id",
+        id_received: isComplete,
+        required_guest_documents: requiredGuestDocuments,
+        received_guest_documents: finalReceivedCount,
+        document_status: isComplete ? "received" : "partial",
+        last_inbound_at: new Date().toISOString(),
+      };
+
+      const { error: convUpdateErr } = await supabaseAdmin
+        .from("conversations")
+        .update(updatePayload)
+        .eq("id", conversationId);
+
+      if (convUpdateErr) {
+        console.error("Conversation update error:", convUpdateErr);
+      }
+
       let replyText = "";
 
       if (successCount > 0) {
-        if (bookingId) {
-          const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
-            .from("booking_guests")
-            .select("id, full_name")
-            .eq("booking_id", bookingId)
-            .eq("id_required", true)
-            .eq("id_received", false)
-            .order("created_at", { ascending: true })
-            .limit(successCount);
-
-          if (missingGuestsErr) {
-            console.error("Error fetching missing booking guests:", missingGuestsErr);
-          } else if (missingGuests && missingGuests.length > 0) {
-            const guestIdsToUpdate = missingGuests.map((g) => g.id);
-
-            const { error: guestUpdateErr } = await supabaseAdmin
-              .from("booking_guests")
-              .update({
-                id_received: true,
-                verification_status: "received",
-              })
-              .in("id", guestIdsToUpdate);
-
-            if (guestUpdateErr) {
-              console.error("Error updating booking guests:", guestUpdateErr);
-            } else {
-              console.log("Marked booking guests as received:", guestIdsToUpdate);
-            }
-          }
-        }
-
-        let finalReceivedCount = successCount;
-
-        if (bookingId) {
-          const { count: receivedGuestCount, error: receivedGuestCountErr } =
-            await supabaseAdmin
-              .from("booking_guests")
-              .select("*", { count: "exact", head: true })
-              .eq("booking_id", bookingId)
-              .eq("id_required", true)
-              .eq("id_received", true);
-
-          if (receivedGuestCountErr) {
-            console.error(
-              "Error counting received booking guests:",
-              receivedGuestCountErr
-            );
-          } else if (typeof receivedGuestCount === "number") {
-            finalReceivedCount = receivedGuestCount;
-          }
-        }
-
-        const isComplete =
-          finalReceivedCount >= requiredGuestDocuments && requiredGuestDocuments > 0;
-        const remaining = Math.max(requiredGuestDocuments - finalReceivedCount, 0);
-
-        const updatePayload = {
-          stage: isComplete ? "document_received" : "awaiting_guest_id",
-          id_received: isComplete,
-          required_guest_documents: requiredGuestDocuments,
-          received_guest_documents: finalReceivedCount,
-          document_status: isComplete ? "received" : "partial",
-          last_inbound_at: new Date().toISOString(),
-        };
-
-        const { error: convUpdateErr } = await supabaseAdmin
-          .from("conversations")
-          .update(updatePayload)
-          .eq("id", conversationId);
-
-        if (convUpdateErr) {
-          console.error("Conversation update error:", convUpdateErr);
-        }
-
         if (isComplete) {
           replyText = `Thank you — we have received all ${finalReceivedCount} required guest ID document(s).`;
         } else {
