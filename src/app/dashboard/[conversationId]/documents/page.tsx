@@ -14,6 +14,9 @@ type DocumentItem = {
   file_size_bytes: number | null;
   document_kind: string | null;
   created_at: string;
+  ai_screening_status: string | null;
+  ai_screening_notes: string | null;
+  ai_screened_at: string | null;
 };
 
 type DocumentsPayload = {
@@ -41,6 +44,19 @@ function statusBadgeClass(status: string | null) {
   }
   if (status === "rejected") {
     return "bg-red-50 text-red-700 border-red-200";
+  }
+  return "bg-slate-50 text-slate-700 border-slate-200";
+}
+
+function aiScreeningBadgeClass(status: string | null) {
+  if (status === "pass") {
+    return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  }
+  if (status === "fail") {
+    return "bg-red-50 text-red-700 border-red-200";
+  }
+  if (status === "review") {
+    return "bg-amber-50 text-amber-700 border-amber-200";
   }
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
@@ -215,9 +231,7 @@ export default function ConversationDocumentsPage() {
         <div className="mb-6 flex items-center justify-between">
           <div>
             <p className="text-sm text-slate-500">Dashboard / Conversation / Documents</p>
-            <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-              Documents
-            </h1>
+            <h1 className="mt-1 text-3xl font-semibold tracking-tight">Documents</h1>
             <p className="mt-2 text-slate-600">
               {data.guestName || "Guest"} · Conversation {data.conversationId.slice(0, 8)}
             </p>
@@ -274,15 +288,21 @@ export default function ConversationDocumentsPage() {
                           <p className="mt-1 text-xs text-slate-400">
                             Uploaded: {new Date(doc.created_at).toLocaleString()}
                           </p>
+                          {doc.ai_screened_at && (
+                            <p className="mt-1 text-xs text-slate-400">
+                              AI screened: {new Date(doc.ai_screened_at).toLocaleString()}
+                            </p>
+                          )}
                         </div>
 
-                        <div className="grid gap-2 sm:grid-cols-3 lg:min-w-[420px]">
+                        <div className="grid gap-2 sm:grid-cols-2 lg:min-w-[520px]">
                           <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
                             <span className="text-slate-500">Kind:</span>{" "}
                             <span className="font-medium text-slate-900">
                               {doc.document_kind || "unknown"}
                             </span>
                           </div>
+
                           <div
                             className={`rounded-xl border px-3 py-2 text-sm ${statusBadgeClass(
                               doc.review_status
@@ -293,14 +313,35 @@ export default function ConversationDocumentsPage() {
                               {doc.review_status || "pending"}
                             </span>
                           </div>
+
                           <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
                             <span className="text-slate-500">Verification:</span>{" "}
                             <span className="font-medium text-slate-900">
                               {doc.verification_status || "pending"}
                             </span>
                           </div>
+
+                          <div
+                            className={`rounded-xl border px-3 py-2 text-sm ${aiScreeningBadgeClass(
+                              doc.ai_screening_status
+                            )}`}
+                          >
+                            <span className="text-slate-500">AI screening:</span>{" "}
+                            <span className="font-medium">
+                              {doc.ai_screening_status || "pending"}
+                            </span>
+                          </div>
                         </div>
                       </div>
+
+                      {doc.ai_screening_notes && (
+                        <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900">
+                          <p className="font-medium">AI screening notes</p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-indigo-800">
+                            {doc.ai_screening_notes}
+                          </p>
+                        </div>
+                      )}
 
                       <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">

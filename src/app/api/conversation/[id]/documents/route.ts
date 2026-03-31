@@ -36,7 +36,10 @@ export async function GET(_req: Request, context: RouteContext) {
         storage_path,
         file_size_bytes,
         document_kind,
-        created_at
+        created_at,
+        ai_screening_status,
+        ai_screening_notes,
+        ai_screened_at
       `)
       .eq("conversation_id", id)
       .order("created_at", { ascending: false });
