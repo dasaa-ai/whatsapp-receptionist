@@ -120,20 +120,14 @@ export default function ConversationDocumentsPage() {
   }, [loadDocuments]);
 
   useEffect(() => {
-    if (!data?.documents?.length) return;
-
-    const hasPendingAi = data.documents.some(
-      (doc) => (doc.ai_screening_status || "pending") === "pending"
-    );
-
-    if (!hasPendingAi) return;
+    if (!conversationId) return;
 
     const interval = setInterval(() => {
       loadDocuments(false);
-    }, 4000);
+    }, 3000);
 
     return () => clearInterval(interval);
-  }, [data, loadDocuments]);
+  }, [conversationId, loadDocuments]);
 
   async function handleViewDocument(documentId: string) {
     try {

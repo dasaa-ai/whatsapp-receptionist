@@ -439,58 +439,122 @@ async function runAIDocumentScreening(params: {
   path: string;
   mimeType: string | null;
   bookingGuestName?: string | null;
-}) {
+}): Promise<{
+  status: "pass" | "review" | "fail";
+  notes: string;
+  documentType: string | null;
+  issuingCountry: string | null;
+  fullName: string | null;
+  dateOfBirth: string | null;
+  expiryDate: string | null;
+  documentNumber: string | null;
+  address: string | null;
+  isExpired: boolean | null;
+  nameMatchBooking: boolean | null;
+  suspicious: boolean | null;
+  confidence: number | null;
+}> {
   const { documentId, bucket, path, mimeType, bookingGuestName } = params;
   const screenedAt = new Date().toISOString();
 
-  const updateDoc = async (patch: Record<string, any>) => {
+  const fallbackResult = (
+    status: "pass" | "review" | "fail",
+    notes: string,
+    extra?: Partial<{
+      documentType: string | null;
+      issuingCountry: string | null;
+      fullName: string | null;
+      dateOfBirth: string | null;
+      expiryDate: string | null;
+      documentNumber: string | null;
+      address: string | null;
+      isExpired: boolean | null;
+      nameMatchBooking: boolean | null;
+      suspicious: boolean | null;
+      confidence: number | null;
+    }>
+  ) => ({
+    status,
+    notes,
+    documentType: null,
+    issuingCountry: null,
+    fullName: null,
+    dateOfBirth: null,
+    expiryDate: null,
+    documentNumber: null,
+    address: null,
+    isExpired: null,
+    nameMatchBooking: null,
+    suspicious: null,
+    confidence: null,
+    ...extra,
+  });
+
+  const persistResult = async (
+    result: ReturnType<typeof fallbackResult> extends infer T ? T : never,
+    reviewStatus?: "pending" | "rejected"
+  ) => {
     await supabaseAdmin
       .from("guest_documents")
       .update({
-        ...patch,
+        ai_screening_status: result.status,
+        ai_screening_notes: result.notes,
         ai_screened_at: screenedAt,
+        ai_document_type: result.documentType,
+        ai_issuing_country: result.issuingCountry,
+        ai_full_name: result.fullName,
+        ai_date_of_birth: result.dateOfBirth,
+        ai_expiry_date: result.expiryDate,
+        ai_document_number: result.documentNumber,
+        ai_address: result.address,
+        ai_is_expired: result.isExpired,
+        ai_name_match_booking: result.nameMatchBooking,
+        ai_suspicious: result.suspicious,
+        ai_confidence: result.confidence,
+        ...(reviewStatus ? { review_status: reviewStatus } : {}),
       })
       .eq("id", documentId);
   };
 
   if (!mimeType) {
-    await updateDoc({
-      ai_screening_status: "review",
-      ai_screening_notes:
-        "AI screening could not determine the file type. Manual review recommended.",
-      ai_suspicious: true,
-    });
-    return;
+    const result = fallbackResult(
+      "fail",
+      "AI could not determine the file type. Please upload a clear photo of a real ID document.",
+      { suspicious: true, confidence: 0 }
+    );
+    await persistResult(result, "rejected");
+    return result;
   }
 
   if (mimeType === "application/pdf") {
-    await updateDoc({
-      ai_screening_status: "review",
-      ai_screening_notes:
-        "PDF uploaded. Rich AI field extraction was skipped in this MVP, so manual review is recommended.",
-      ai_suspicious: false,
-    });
-    return;
+    const result = fallbackResult(
+      "review",
+      "PDF uploaded. Rich AI field extraction is skipped for PDFs in this MVP, so host review is required.",
+      { suspicious: false, confidence: 0.4 }
+    );
+    await persistResult(result, "pending");
+    return result;
   }
 
   if (!mimeType.startsWith("image/")) {
-    await updateDoc({
-      ai_screening_status: "review",
-      ai_screening_notes: `Unsupported file type for AI image screening: ${mimeType}. Manual review recommended.`,
-      ai_suspicious: true,
-    });
-    return;
+    const result = fallbackResult(
+      "fail",
+      `Unsupported file type for AI image screening: ${mimeType}. Please upload a clear JPG, PNG, or PDF of a real ID document.`,
+      { suspicious: true, confidence: 0 }
+    );
+    await persistResult(result, "rejected");
+    return result;
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    await updateDoc({
-      ai_screening_status: "review",
-      ai_screening_notes:
-        "AI screening was unavailable because OPENAI_API_KEY is missing. Manual review recommended.",
-      ai_suspicious: false,
-    });
-    return;
+    const result = fallbackResult(
+      "review",
+      "AI screening was unavailable because OPENAI_API_KEY is missing. Manual host review recommended.",
+      { suspicious: false, confidence: null }
+    );
+    await persistResult(result, "pending");
+    return result;
   }
 
   try {
@@ -498,13 +562,14 @@ async function runAIDocumentScreening(params: {
 
     if (signed.error || !signed.data?.signedUrl) {
       console.error("[AI_SCREENING][SIGNED_URL_ERROR]", signed.error);
-      await updateDoc({
-        ai_screening_status: "review",
-        ai_screening_notes:
-          "AI screening could not access the uploaded file securely. Manual review recommended.",
-        ai_suspicious: true,
-      });
-      return;
+
+      const result = fallbackResult(
+        "review",
+        "AI screening could not access the uploaded file securely. Manual host review recommended.",
+        { suspicious: true, confidence: 0 }
+      );
+      await persistResult(result, "pending");
+      return result;
     }
 
     const bookingContext = bookingGuestName?.trim()
@@ -528,21 +593,21 @@ async function runAIDocumentScreening(params: {
               'You are assisting hospitality staff with AI-assisted ID screening. Assess whether the uploaded image is actually an identification document and whether it is usable for human review. Do NOT claim guaranteed authenticity or legal verification. IMPORTANT RULES: If the image is clearly not an ID/document, or is random scenery/background/abstract blur, or no identifiable document structure/text/fields are visible, return status "fail". If it may be a document but is too blurry/cropped/glared/incomplete to trust, return status "review". Return "pass" only when it clearly appears to be a readable ID/document with usable visible details. Return strict JSON only with this shape: {"status":"pass|review|fail","notes":"short summary","document_type":"... or null","issuing_country":"... or null","full_name":"... or null","date_of_birth":"YYYY-MM-DD or null","expiry_date":"YYYY-MM-DD or null","document_number":"... or null","address":"... or null","is_expired":true|false|null,"name_match_booking":true|false|null,"suspicious":true|false|null,"confidence":0.0}. Use null when unknown.',
           },
           {
-  role: "user",
-  content: [
-    {
-      type: "text",
-      text:
-        `Screen this uploaded image for hospitality ID intake. First decide whether this is actually an ID/document at all. If it is not clearly an ID/document, mark it fail. If it is a possible ID/document but unreadable or too blurry/cropped/glared/incomplete, mark it review. Only mark pass if it is clearly a readable identification document. If it is a real document, extract document type, issuing country, full name, date of birth, expiry date, document number, and address if visible. Also infer whether the document appears expired and whether the name plausibly matches the booking guest. ${bookingContext}`,
-    },
-    {
-      type: "image_url",
-      image_url: {
-        url: signed.data.signedUrl,
-      },
-    },
-  ],
-},
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  `Screen this uploaded image for hospitality ID intake. First decide whether this is actually an ID/document at all. If it is not clearly an ID/document, mark it fail. If it is a possible ID/document but unreadable or too blurry/cropped/glared/incomplete, mark it review. Only mark pass if it is clearly a readable identification document. If it is a real document, extract document type, issuing country, full name, date of birth, expiry date, document number, and address if visible. Also infer whether the document appears expired and whether the name plausibly matches the booking guest. ${bookingContext}`,
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: signed.data.signedUrl,
+                },
+              },
+            ],
+          },
         ],
       }),
     });
@@ -550,25 +615,27 @@ async function runAIDocumentScreening(params: {
     if (!res.ok) {
       const errText = await res.text();
       console.error("[AI_SCREENING][OPENAI_HTTP_ERROR]", errText);
-      await updateDoc({
-        ai_screening_status: "review",
-        ai_screening_notes:
-          "AI screening could not complete successfully. Manual review recommended.",
-        ai_suspicious: false,
-      });
-      return;
+
+      const result = fallbackResult(
+        "review",
+        "AI screening could not complete successfully. Manual host review recommended.",
+        { suspicious: false, confidence: null }
+      );
+      await persistResult(result, "pending");
+      return result;
     }
 
     const data: any = await res.json();
     const raw = data?.choices?.[0]?.message?.content?.trim();
 
     if (!raw) {
-      await updateDoc({
-        ai_screening_status: "review",
-        ai_screening_notes: "AI screening returned no result. Manual review recommended.",
-        ai_suspicious: false,
-      });
-      return;
+      const result = fallbackResult(
+        "review",
+        "AI screening returned no result. Manual host review recommended.",
+        { suspicious: false, confidence: null }
+      );
+      await persistResult(result, "pending");
+      return result;
     }
 
     let parsed: any = null;
@@ -578,34 +645,37 @@ async function runAIDocumentScreening(params: {
       parsed = null;
     }
 
-    const status = normalizeAIScreeningStatus(parsed?.status);
-    const notes =
-      typeof parsed?.notes === "string" && parsed.notes.trim()
-        ? parsed.notes.trim()
-        : "AI screening completed. Manual host review is still recommended.";
+    const result = {
+      status: normalizeAIScreeningStatus(parsed?.status),
+      notes:
+        typeof parsed?.notes === "string" && parsed.notes.trim()
+          ? parsed.notes.trim()
+          : "AI screening completed. Manual host review is still recommended.",
+      documentType: cleanNullableText(parsed?.document_type),
+      issuingCountry: cleanNullableText(parsed?.issuing_country),
+      fullName: cleanNullableText(parsed?.full_name),
+      dateOfBirth: cleanNullableText(parsed?.date_of_birth),
+      expiryDate: cleanNullableText(parsed?.expiry_date),
+      documentNumber: cleanNullableText(parsed?.document_number),
+      address: cleanNullableText(parsed?.address),
+      isExpired: normalizeBoolean(parsed?.is_expired),
+      nameMatchBooking: normalizeBoolean(parsed?.name_match_booking),
+      suspicious: normalizeBoolean(parsed?.suspicious),
+      confidence: normalizeConfidence(parsed?.confidence),
+    };
 
-    await updateDoc({
-      ai_screening_status: status,
-      ai_screening_notes: notes,
-      ai_document_type: cleanNullableText(parsed?.document_type),
-      ai_issuing_country: cleanNullableText(parsed?.issuing_country),
-      ai_full_name: cleanNullableText(parsed?.full_name),
-      ai_date_of_birth: cleanNullableText(parsed?.date_of_birth),
-      ai_expiry_date: cleanNullableText(parsed?.expiry_date),
-      ai_document_number: cleanNullableText(parsed?.document_number),
-      ai_address: cleanNullableText(parsed?.address),
-      ai_is_expired: normalizeBoolean(parsed?.is_expired),
-      ai_name_match_booking: normalizeBoolean(parsed?.name_match_booking),
-      ai_suspicious: normalizeBoolean(parsed?.suspicious),
-      ai_confidence: normalizeConfidence(parsed?.confidence),
-    });
+    await persistResult(result, result.status === "fail" ? "rejected" : "pending");
+    return result;
   } catch (error) {
     console.error("[AI_SCREENING][UNEXPECTED_ERROR]", error);
-    await updateDoc({
-      ai_screening_status: "review",
-      ai_screening_notes: "AI screening hit an unexpected error. Manual review recommended.",
-      ai_suspicious: false,
-    });
+
+    const result = fallbackResult(
+      "review",
+      "AI screening hit an unexpected error. Manual host review recommended.",
+      { suspicious: false, confidence: null }
+    );
+    await persistResult(result, "pending");
+    return result;
   }
 }
 
@@ -1007,9 +1077,12 @@ export async function POST(req: Request) {
         });
       }
 
-      let successCount = 0;
+            let acceptedCount = 0;
       let invalidCount = 0;
-      let failedCount = 0;
+      let processingFailedCount = 0;
+      let aiRejectedCount = 0;
+      let aiReviewCount = 0;
+      const aiRejectReasons: string[] = [];
 
       for (const mediaItem of mediaItems) {
         if (!isAllowedDocumentType(mediaItem.contentType)) {
@@ -1073,28 +1146,36 @@ export async function POST(req: Request) {
             }
           }
 
-          if (insertRes.data?.id) {
-            void runAIDocumentScreening({
-              documentId: insertRes.data.id,
-              bucket: uploaded.bucket,
-              path: uploaded.path,
-              mimeType: mediaItem.contentType,
-              bookingGuestName,
-            }).catch((error) => {
-              console.error("[AI_SCREENING][ASYNC_ERROR]", error);
-            });
+          const screening = await runAIDocumentScreening({
+            documentId: insertRes.data.id,
+            bucket: uploaded.bucket,
+            path: uploaded.path,
+            mimeType: mediaItem.contentType,
+            bookingGuestName,
+          });
+
+          if (screening.status === "fail") {
+            aiRejectedCount += 1;
+            if (screening.notes) {
+              aiRejectReasons.push(screening.notes);
+            }
+            continue;
           }
 
-          successCount += 1;
+          if (screening.status === "review") {
+            aiReviewCount += 1;
+          }
+
+          acceptedCount += 1;
         } catch (error) {
           console.error("Failed processing media item:", error);
-          failedCount += 1;
+          processingFailedCount += 1;
         }
       }
 
-      let finalReceivedCount = receivedGuestDocuments + successCount;
+      let finalReceivedCount = receivedGuestDocuments + acceptedCount;
 
-      if (bookingId && successCount > 0) {
+      if (bookingId && acceptedCount > 0) {
         const { data: missingGuests, error: missingGuestsErr } = await supabaseAdmin
           .from("booking_guests")
           .select("id, full_name")
@@ -1102,7 +1183,7 @@ export async function POST(req: Request) {
           .eq("id_required", true)
           .eq("id_received", false)
           .order("created_at", { ascending: true })
-          .limit(successCount);
+          .limit(acceptedCount);
 
         if (missingGuestsErr) {
           console.error("Error fetching missing booking guests:", missingGuestsErr);
@@ -1151,7 +1232,7 @@ export async function POST(req: Request) {
         id_received: isComplete,
         required_guest_documents: requiredGuestDocuments,
         received_guest_documents: finalReceivedCount,
-        document_status: isComplete ? "received" : "partial",
+        document_status: isComplete ? "received" : finalReceivedCount > 0 ? "partial" : "requested",
         last_inbound_at: new Date().toISOString(),
       };
 
@@ -1166,16 +1247,31 @@ export async function POST(req: Request) {
 
       let replyText = "";
 
-      if (successCount > 0) {
+      if (acceptedCount > 0) {
         if (isComplete) {
           replyText = `Thank you — we have received all ${finalReceivedCount} required guest ID document(s).`;
         } else {
           replyText = `Thank you — we have received ${finalReceivedCount} of ${requiredGuestDocuments} required guest ID document(s). Please send the remaining ${remaining}.`;
         }
 
-        if (invalidCount > 0 || failedCount > 0) {
-          replyText += ` ${invalidCount + failedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
+        if (aiRejectedCount > 0) {
+          replyText += ` ${aiRejectedCount} file(s) were automatically rejected because they did not look like readable ID documents. Please resend a clear real ID image.`;
         }
+
+        if (aiReviewCount > 0) {
+          replyText += ` Some accepted file(s) may still need host review.`;
+        }
+
+        if (invalidCount > 0 || processingFailedCount > 0) {
+          replyText += ` ${invalidCount + processingFailedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
+        }
+      } else if (aiRejectedCount > 0) {
+        const primaryReason =
+          aiRejectReasons[0] ||
+          "The uploaded file did not look like a readable ID document.";
+        replyText =
+          `We could not accept your file as a valid ID document. ${primaryReason} ` +
+          `Please upload a clear photo of a real passport, driving licence, or national ID card in JPG, PNG, or PDF format.`;
       } else {
         replyText =
           "We could not process your document yet. To continue check-in, please send a clear photo of your ID or passport here on WhatsApp in JPG, PNG, or PDF format.";
