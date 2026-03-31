@@ -24,6 +24,7 @@ type ConversationDetail = {
   checkinDate: string;
   propertyName: string;
   bookingId: string | null;
+  aiPaused: boolean;
   messages: Message[];
 };
 
@@ -88,6 +89,7 @@ export default function ConversationDetailPage() {
   const [reply, setReply] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [togglingAi, setTogglingAi] = useState(false);
   const [error, setError] = useState("");
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -157,6 +159,44 @@ export default function ConversationDetailPage() {
     }
   }
 
+  async function handleToggleAi() {
+    if (!detail || !conversationId || togglingAi) return;
+
+    try {
+      setTogglingAi(true);
+      setError("");
+
+      const nextAiPaused = !detail.aiPaused;
+
+      const res = await fetch(`/api/conversation/${conversationId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ aiPaused: nextAiPaused }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to update AI state");
+      }
+
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              aiPaused: nextAiPaused,
+            }
+          : prev
+      );
+    } catch (err: any) {
+      setError(err?.message || "Failed to update AI state");
+    } finally {
+      setTogglingAi(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-white via-slate-50 to-slate-100 p-10 text-slate-900">
@@ -211,10 +251,24 @@ export default function ConversationDetailPage() {
         <div className="grid gap-6 xl:grid-cols-[1.6fr_0.8fr]">
           <div className="flex h-[78vh] min-h-[600px] flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-100 p-6">
-              <h2 className="text-xl font-semibold">Message thread</h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Real messages from your WhatsApp receptionist flow.
-              </p>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold">Message thread</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Real messages from your WhatsApp receptionist flow.
+                  </p>
+                </div>
+
+                <div
+                  className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                    detail.aiPaused
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-emerald-100 text-emerald-800"
+                  }`}
+                >
+                  {detail.aiPaused ? "AI Paused" : "AI Active"}
+                </div>
+              </div>
             </div>
 
             <div className="flex-1 space-y-4 overflow-y-auto p-6">
@@ -356,6 +410,16 @@ export default function ConversationDetailPage() {
                     <span>Document status</span>
                     <span className="font-medium text-slate-900">{detail.documentStatus}</span>
                   </div>
+                  <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <span>AI status</span>
+                    <span
+                      className={`font-medium ${
+                        detail.aiPaused ? "text-amber-700" : "text-emerald-700"
+                      }`}
+                    >
+                      {detail.aiPaused ? "Paused" : "Active"}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -364,15 +428,33 @@ export default function ConversationDetailPage() {
               <div className="p-6">
                 <h2 className="text-xl font-semibold">Host actions</h2>
                 <div className="mt-4 grid gap-3">
+                  <button
+                    onClick={handleToggleAi}
+                    disabled={togglingAi}
+                    className={`rounded-2xl border px-4 py-3 text-left text-sm shadow-sm disabled:cursor-not-allowed ${
+                      detail.aiPaused
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-amber-200 bg-amber-50 text-amber-800"
+                    }`}
+                  >
+                    {togglingAi
+                      ? "Updating AI status..."
+                      : detail.aiPaused
+                        ? "Resume AI auto-replies"
+                        : "Pause AI auto-replies"}
+                  </button>
+
                   <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
                     Mark as priority
                   </button>
+
                   <Link
                     href={`/dashboard/${detail.id}/documents`}
                     className="block rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm"
                   >
                     Open documents
                   </Link>
+
                   <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm">
                     Booking: {detail.bookingId ? detail.bookingId.slice(0, 8) : "N/A"}
                   </button>
