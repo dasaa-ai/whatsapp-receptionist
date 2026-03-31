@@ -1043,13 +1043,15 @@ export async function POST(req: Request) {
           }
 
           if (insertRes.data?.id) {
-            await runAIDocumentScreening({
-              documentId: insertRes.data.id,
-              bucket: uploaded.bucket,
-              path: uploaded.path,
-              mimeType: mediaItem.contentType,
-            });
-          }
+  void runAIDocumentScreening({
+    documentId: insertRes.data.id,
+    bucket: uploaded.bucket,
+    path: uploaded.path,
+    mimeType: mediaItem.contentType,
+  }).catch((error) => {
+    console.error("[AI_SCREENING][ASYNC_ERROR]", error);
+  });
+}
 
           successCount += 1;
         } catch (error) {
