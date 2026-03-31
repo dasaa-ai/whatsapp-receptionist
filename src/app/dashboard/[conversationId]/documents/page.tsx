@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 
 type DocumentItem = {
@@ -91,33 +91,49 @@ export default function ConversationDocumentsPage() {
   const [reasonTargetStatus, setReasonTargetStatus] = useState<"approved" | "rejected" | "">("");
   const [reasonText, setReasonText] = useState("");
 
-  useEffect(() => {
+  const loadDocuments = useCallback(async (showLoading = false) => {
     if (!conversationId) return;
 
-    async function load() {
-      try {
-        setLoading(true);
-        setError("");
+    try {
+      if (showLoading) setLoading(true);
+      setError("");
 
-        const res = await fetch(`/api/conversation/${conversationId}/documents`, {
-          cache: "no-store",
-        });
-        const payload = await res.json();
+      const res = await fetch(`/api/conversation/${conversationId}/documents`, {
+        cache: "no-store",
+      });
+      const payload = await res.json();
 
-        if (!res.ok) {
-          throw new Error(payload?.error || "Failed to load documents");
-        }
-
-        setData(payload);
-      } catch (err: any) {
-        setError(err?.message || "Failed to load documents");
-      } finally {
-        setLoading(false);
+      if (!res.ok) {
+        throw new Error(payload?.error || "Failed to load documents");
       }
-    }
 
-    load();
+      setData(payload);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load documents");
+    } finally {
+      if (showLoading) setLoading(false);
+    }
   }, [conversationId]);
+
+  useEffect(() => {
+    loadDocuments(true);
+  }, [loadDocuments]);
+
+  useEffect(() => {
+    if (!data?.documents?.length) return;
+
+    const hasPendingAi = data.documents.some(
+      (doc) => (doc.ai_screening_status || "pending") === "pending"
+    );
+
+    if (!hasPendingAi) return;
+
+    const interval = setInterval(() => {
+      loadDocuments(false);
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [data, loadDocuments]);
 
   async function handleViewDocument(documentId: string) {
     try {

@@ -525,24 +525,24 @@ async function runAIDocumentScreening(params: {
           {
             role: "system",
             content:
-              'You are assisting hospitality staff with AI-assisted ID screening. Assess image usability and extract likely visible fields. Do NOT claim guaranteed authenticity or legal verification. Return strict JSON only with this shape: {"status":"pass|review|fail","notes":"short summary","document_type":"... or null","issuing_country":"... or null","full_name":"... or null","date_of_birth":"YYYY-MM-DD or null","expiry_date":"YYYY-MM-DD or null","document_number":"... or null","address":"... or null","is_expired":true|false|null,"name_match_booking":true|false|null,"suspicious":true|false|null,"confidence":0.0}. Use null when unknown.',
+              'You are assisting hospitality staff with AI-assisted ID screening. Assess whether the uploaded image is actually an identification document and whether it is usable for human review. Do NOT claim guaranteed authenticity or legal verification. IMPORTANT RULES: If the image is clearly not an ID/document, or is random scenery/background/abstract blur, or no identifiable document structure/text/fields are visible, return status "fail". If it may be a document but is too blurry/cropped/glared/incomplete to trust, return status "review". Return "pass" only when it clearly appears to be a readable ID/document with usable visible details. Return strict JSON only with this shape: {"status":"pass|review|fail","notes":"short summary","document_type":"... or null","issuing_country":"... or null","full_name":"... or null","date_of_birth":"YYYY-MM-DD or null","expiry_date":"YYYY-MM-DD or null","document_number":"... or null","address":"... or null","is_expired":true|false|null,"name_match_booking":true|false|null,"suspicious":true|false|null,"confidence":0.0}. Use null when unknown.',
           },
           {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text:
-                  `Screen this uploaded ID image for hospitality intake. Focus on readability, blur, cropping, glare, completeness, document type, issuing country, full name, date of birth, expiry date, document number, and address if visible. Also infer whether the document appears expired and whether the name plausibly matches the booking guest. ${bookingContext}`,
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: signed.data.signedUrl,
-                },
-              },
-            ],
-          },
+  role: "user",
+  content: [
+    {
+      type: "text",
+      text:
+        `Screen this uploaded image for hospitality ID intake. First decide whether this is actually an ID/document at all. If it is not clearly an ID/document, mark it fail. If it is a possible ID/document but unreadable or too blurry/cropped/glared/incomplete, mark it review. Only mark pass if it is clearly a readable identification document. If it is a real document, extract document type, issuing country, full name, date of birth, expiry date, document number, and address if visible. Also infer whether the document appears expired and whether the name plausibly matches the booking guest. ${bookingContext}`,
+    },
+    {
+      type: "image_url",
+      image_url: {
+        url: signed.data.signedUrl,
+      },
+    },
+  ],
+},
         ],
       }),
     });
