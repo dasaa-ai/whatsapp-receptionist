@@ -40,6 +40,17 @@ export async function GET(_req: Request, context: RouteContext) {
         ai_screening_status,
         ai_screening_notes,
         ai_screened_at,
+        ai_document_type,
+        ai_issuing_country,
+        ai_full_name,
+        ai_date_of_birth,
+        ai_expiry_date,
+        ai_document_number,
+        ai_address,
+        ai_is_expired,
+        ai_name_match_booking,
+        ai_suspicious,
+        ai_confidence,
         deleted_at
       `)
       .eq("conversation_id", id)

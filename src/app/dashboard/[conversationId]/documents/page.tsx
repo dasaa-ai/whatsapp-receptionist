@@ -17,6 +17,17 @@ type DocumentItem = {
   ai_screening_status: string | null;
   ai_screening_notes: string | null;
   ai_screened_at: string | null;
+  ai_document_type: string | null;
+  ai_issuing_country: string | null;
+  ai_full_name: string | null;
+  ai_date_of_birth: string | null;
+  ai_expiry_date: string | null;
+  ai_document_number: string | null;
+  ai_address: string | null;
+  ai_is_expired: boolean | null;
+  ai_name_match_booking: boolean | null;
+  ai_suspicious: boolean | null;
+  ai_confidence: number | null;
 };
 
 type DocumentsPayload = {
@@ -59,6 +70,12 @@ function aiScreeningBadgeClass(status: string | null) {
     return "bg-amber-50 text-amber-700 border-amber-200";
   }
   return "bg-slate-50 text-slate-700 border-slate-200";
+}
+
+function booleanLabel(value: boolean | null, trueLabel: string, falseLabel: string) {
+  if (value === true) return trueLabel;
+  if (value === false) return falseLabel;
+  return "Unknown";
 }
 
 export default function ConversationDocumentsPage() {
@@ -334,12 +351,103 @@ export default function ConversationDocumentsPage() {
                         </div>
                       </div>
 
-                      {doc.ai_screening_notes && (
-                        <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900">
-                          <p className="font-medium">AI screening notes</p>
-                          <p className="mt-1 whitespace-pre-wrap break-words text-indigo-800">
-                            {doc.ai_screening_notes}
-                          </p>
+                      {(doc.ai_screening_notes ||
+                        doc.ai_document_type ||
+                        doc.ai_issuing_country ||
+                        doc.ai_full_name ||
+                        doc.ai_date_of_birth ||
+                        doc.ai_expiry_date ||
+                        doc.ai_document_number ||
+                        doc.ai_address ||
+                        doc.ai_is_expired !== null ||
+                        doc.ai_name_match_booking !== null ||
+                        doc.ai_suspicious !== null ||
+                        doc.ai_confidence !== null) && (
+                        <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-4 text-sm text-indigo-900">
+                          <p className="font-semibold">AI screening summary</p>
+
+                          {doc.ai_screening_notes && (
+                            <p className="mt-2 whitespace-pre-wrap break-words text-indigo-800">
+                              {doc.ai_screening_notes}
+                            </p>
+                          )}
+
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            {doc.ai_document_type && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Document type:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_document_type}</span>
+                              </div>
+                            )}
+                            {doc.ai_issuing_country && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Issuing country:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_issuing_country}</span>
+                              </div>
+                            )}
+                            {doc.ai_full_name && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Full name:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_full_name}</span>
+                              </div>
+                            )}
+                            {doc.ai_date_of_birth && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Date of birth:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_date_of_birth}</span>
+                              </div>
+                            )}
+                            {doc.ai_expiry_date && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Expiry date:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_expiry_date}</span>
+                              </div>
+                            )}
+                            {doc.ai_document_number && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Document number:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_document_number}</span>
+                              </div>
+                            )}
+                            {doc.ai_address && (
+                              <div className="rounded-xl bg-white px-3 py-2 sm:col-span-2 lg:col-span-3">
+                                <span className="text-indigo-500">Address:</span>{" "}
+                                <span className="font-medium text-slate-900">{doc.ai_address}</span>
+                              </div>
+                            )}
+                            {doc.ai_is_expired !== null && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Expired:</span>{" "}
+                                <span className="font-medium text-slate-900">
+                                  {booleanLabel(doc.ai_is_expired, "Yes", "No")}
+                                </span>
+                              </div>
+                            )}
+                            {doc.ai_name_match_booking !== null && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Matches booking name:</span>{" "}
+                                <span className="font-medium text-slate-900">
+                                  {booleanLabel(doc.ai_name_match_booking, "Likely yes", "Likely no")}
+                                </span>
+                              </div>
+                            )}
+                            {doc.ai_suspicious !== null && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Suspicious:</span>{" "}
+                                <span className="font-medium text-slate-900">
+                                  {booleanLabel(doc.ai_suspicious, "Yes", "No")}
+                                </span>
+                              </div>
+                            )}
+                            {doc.ai_confidence !== null && (
+                              <div className="rounded-xl bg-white px-3 py-2">
+                                <span className="text-indigo-500">Confidence:</span>{" "}
+                                <span className="font-medium text-slate-900">
+                                  {Math.round(doc.ai_confidence * 100)}%
+                                </span>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
 

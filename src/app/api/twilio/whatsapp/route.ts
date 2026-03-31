@@ -44,11 +44,6 @@ type TopicKey =
   | "pricing"
   | "general";
 
-type AIScreeningResult = {
-  status: "pass" | "review" | "fail";
-  notes: string;
-};
-
 function normalizeLang(lang?: string | null): string | null {
   if (!lang) return null;
 
@@ -102,6 +97,27 @@ function normalizeAIScreeningStatus(value: string | null | undefined): "pass" | 
   if (v === "pass") return "pass";
   if (v === "fail") return "fail";
   return "review";
+}
+
+function normalizeBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+  }
+  return null;
+}
+
+function normalizeConfidence(value: unknown): number | null {
+  if (typeof value !== "number" || Number.isNaN(value)) return null;
+  return Math.max(0, Math.min(1, value));
+}
+
+function cleanNullableText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  return v ? v : null;
 }
 
 async function translateBetweenLanguages(params: {
@@ -422,57 +438,58 @@ async function runAIDocumentScreening(params: {
   bucket: string;
   path: string;
   mimeType: string | null;
+  bookingGuestName?: string | null;
 }) {
-  const { documentId, bucket, path, mimeType } = params;
-
+  const { documentId, bucket, path, mimeType, bookingGuestName } = params;
   const screenedAt = new Date().toISOString();
 
-  if (!mimeType) {
+  const updateDoc = async (patch: Record<string, any>) => {
     await supabaseAdmin
       .from("guest_documents")
       .update({
-        ai_screening_status: "review",
-        ai_screening_notes: "AI screening could not determine the file type. Manual review recommended.",
+        ...patch,
         ai_screened_at: screenedAt,
       })
       .eq("id", documentId);
+  };
+
+  if (!mimeType) {
+    await updateDoc({
+      ai_screening_status: "review",
+      ai_screening_notes:
+        "AI screening could not determine the file type. Manual review recommended.",
+      ai_suspicious: true,
+    });
     return;
   }
 
   if (mimeType === "application/pdf") {
-    await supabaseAdmin
-      .from("guest_documents")
-      .update({
-        ai_screening_status: "review",
-        ai_screening_notes: "PDF uploaded. AI image screening was skipped in this MVP, so manual review is recommended.",
-        ai_screened_at: screenedAt,
-      })
-      .eq("id", documentId);
+    await updateDoc({
+      ai_screening_status: "review",
+      ai_screening_notes:
+        "PDF uploaded. Rich AI field extraction was skipped in this MVP, so manual review is recommended.",
+      ai_suspicious: false,
+    });
     return;
   }
 
   if (!mimeType.startsWith("image/")) {
-    await supabaseAdmin
-      .from("guest_documents")
-      .update({
-        ai_screening_status: "review",
-        ai_screening_notes: `Unsupported file type for AI image screening: ${mimeType}. Manual review recommended.`,
-        ai_screened_at: screenedAt,
-      })
-      .eq("id", documentId);
+    await updateDoc({
+      ai_screening_status: "review",
+      ai_screening_notes: `Unsupported file type for AI image screening: ${mimeType}. Manual review recommended.`,
+      ai_suspicious: true,
+    });
     return;
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    await supabaseAdmin
-      .from("guest_documents")
-      .update({
-        ai_screening_status: "review",
-        ai_screening_notes: "AI screening was unavailable because OPENAI_API_KEY is missing. Manual review recommended.",
-        ai_screened_at: screenedAt,
-      })
-      .eq("id", documentId);
+    await updateDoc({
+      ai_screening_status: "review",
+      ai_screening_notes:
+        "AI screening was unavailable because OPENAI_API_KEY is missing. Manual review recommended.",
+      ai_suspicious: false,
+    });
     return;
   }
 
@@ -481,16 +498,18 @@ async function runAIDocumentScreening(params: {
 
     if (signed.error || !signed.data?.signedUrl) {
       console.error("[AI_SCREENING][SIGNED_URL_ERROR]", signed.error);
-      await supabaseAdmin
-        .from("guest_documents")
-        .update({
-          ai_screening_status: "review",
-          ai_screening_notes: "AI screening could not access the uploaded file securely. Manual review recommended.",
-          ai_screened_at: screenedAt,
-        })
-        .eq("id", documentId);
+      await updateDoc({
+        ai_screening_status: "review",
+        ai_screening_notes:
+          "AI screening could not access the uploaded file securely. Manual review recommended.",
+        ai_suspicious: true,
+      });
       return;
     }
+
+    const bookingContext = bookingGuestName?.trim()
+      ? `Expected booking guest name: ${bookingGuestName.trim()}`
+      : "No booking guest name was available for comparison.";
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -506,7 +525,7 @@ async function runAIDocumentScreening(params: {
           {
             role: "system",
             content:
-              'You are assisting hospitality staff with document intake screening. Assess only upload quality/usability, not legal authenticity. Evaluate whether the uploaded ID image appears readable, sufficiently complete, not overly blurry, and usable for human review. Return strict JSON only like {"status":"pass","notes":"Short explanation"} where status is one of: pass, review, fail.',
+              'You are assisting hospitality staff with AI-assisted ID screening. Assess image usability and extract likely visible fields. Do NOT claim guaranteed authenticity or legal verification. Return strict JSON only with this shape: {"status":"pass|review|fail","notes":"short summary","document_type":"... or null","issuing_country":"... or null","full_name":"... or null","date_of_birth":"YYYY-MM-DD or null","expiry_date":"YYYY-MM-DD or null","document_number":"... or null","address":"... or null","is_expired":true|false|null,"name_match_booking":true|false|null,"suspicious":true|false|null,"confidence":0.0}. Use null when unknown.',
           },
           {
             role: "user",
@@ -514,7 +533,7 @@ async function runAIDocumentScreening(params: {
               {
                 type: "text",
                 text:
-                  "Screen this uploaded ID image for hospitality intake. Focus on readability, blur, cropping, completeness, and whether it looks usable for human document review. Do not claim guaranteed legitimacy or fraud detection.",
+                  `Screen this uploaded ID image for hospitality intake. Focus on readability, blur, cropping, glare, completeness, document type, issuing country, full name, date of birth, expiry date, document number, and address if visible. Also infer whether the document appears expired and whether the name plausibly matches the booking guest. ${bookingContext}`,
               },
               {
                 type: "image_url",
@@ -531,15 +550,12 @@ async function runAIDocumentScreening(params: {
     if (!res.ok) {
       const errText = await res.text();
       console.error("[AI_SCREENING][OPENAI_HTTP_ERROR]", errText);
-
-      await supabaseAdmin
-        .from("guest_documents")
-        .update({
-          ai_screening_status: "review",
-          ai_screening_notes: "AI screening could not complete successfully. Manual review recommended.",
-          ai_screened_at: screenedAt,
-        })
-        .eq("id", documentId);
+      await updateDoc({
+        ai_screening_status: "review",
+        ai_screening_notes:
+          "AI screening could not complete successfully. Manual review recommended.",
+        ai_suspicious: false,
+      });
       return;
     }
 
@@ -547,14 +563,11 @@ async function runAIDocumentScreening(params: {
     const raw = data?.choices?.[0]?.message?.content?.trim();
 
     if (!raw) {
-      await supabaseAdmin
-        .from("guest_documents")
-        .update({
-          ai_screening_status: "review",
-          ai_screening_notes: "AI screening returned no result. Manual review recommended.",
-          ai_screened_at: screenedAt,
-        })
-        .eq("id", documentId);
+      await updateDoc({
+        ai_screening_status: "review",
+        ai_screening_notes: "AI screening returned no result. Manual review recommended.",
+        ai_suspicious: false,
+      });
       return;
     }
 
@@ -571,25 +584,28 @@ async function runAIDocumentScreening(params: {
         ? parsed.notes.trim()
         : "AI screening completed. Manual host review is still recommended.";
 
-    await supabaseAdmin
-      .from("guest_documents")
-      .update({
-        ai_screening_status: status,
-        ai_screening_notes: notes,
-        ai_screened_at: screenedAt,
-      })
-      .eq("id", documentId);
+    await updateDoc({
+      ai_screening_status: status,
+      ai_screening_notes: notes,
+      ai_document_type: cleanNullableText(parsed?.document_type),
+      ai_issuing_country: cleanNullableText(parsed?.issuing_country),
+      ai_full_name: cleanNullableText(parsed?.full_name),
+      ai_date_of_birth: cleanNullableText(parsed?.date_of_birth),
+      ai_expiry_date: cleanNullableText(parsed?.expiry_date),
+      ai_document_number: cleanNullableText(parsed?.document_number),
+      ai_address: cleanNullableText(parsed?.address),
+      ai_is_expired: normalizeBoolean(parsed?.is_expired),
+      ai_name_match_booking: normalizeBoolean(parsed?.name_match_booking),
+      ai_suspicious: normalizeBoolean(parsed?.suspicious),
+      ai_confidence: normalizeConfidence(parsed?.confidence),
+    });
   } catch (error) {
     console.error("[AI_SCREENING][UNEXPECTED_ERROR]", error);
-
-    await supabaseAdmin
-      .from("guest_documents")
-      .update({
-        ai_screening_status: "review",
-        ai_screening_notes: "AI screening hit an unexpected error. Manual review recommended.",
-        ai_screened_at: screenedAt,
-      })
-      .eq("id", documentId);
+    await updateDoc({
+      ai_screening_status: "review",
+      ai_screening_notes: "AI screening hit an unexpected error. Manual review recommended.",
+      ai_suspicious: false,
+    });
   }
 }
 
@@ -913,8 +929,6 @@ export async function POST(req: Request) {
     const idReceived =
       receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
 
-    // IMPORTANT FIX:
-    // Treat incoming media as document upload whenever the conversation still needs docs.
     const requiresIdUpload =
       !idReceived &&
       (
@@ -1042,16 +1056,34 @@ export async function POST(req: Request) {
             throw insertRes.error;
           }
 
+          let bookingGuestName: string | null = null;
+          if (bookingId) {
+            const missingGuestRes = await supabaseAdmin
+              .from("booking_guests")
+              .select("full_name")
+              .eq("booking_id", bookingId)
+              .eq("id_required", true)
+              .eq("id_received", false)
+              .order("created_at", { ascending: true })
+              .limit(1)
+              .maybeSingle();
+
+            if (!missingGuestRes.error) {
+              bookingGuestName = missingGuestRes.data?.full_name || null;
+            }
+          }
+
           if (insertRes.data?.id) {
-  void runAIDocumentScreening({
-    documentId: insertRes.data.id,
-    bucket: uploaded.bucket,
-    path: uploaded.path,
-    mimeType: mediaItem.contentType,
-  }).catch((error) => {
-    console.error("[AI_SCREENING][ASYNC_ERROR]", error);
-  });
-}
+            void runAIDocumentScreening({
+              documentId: insertRes.data.id,
+              bucket: uploaded.bucket,
+              path: uploaded.path,
+              mimeType: mediaItem.contentType,
+              bookingGuestName,
+            }).catch((error) => {
+              console.error("[AI_SCREENING][ASYNC_ERROR]", error);
+            });
+          }
 
           successCount += 1;
         } catch (error) {
