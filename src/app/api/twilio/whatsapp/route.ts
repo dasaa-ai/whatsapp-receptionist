@@ -556,6 +556,7 @@ export async function POST(req: Request) {
     const conversationId = existingConv.id as string;
     const stage = (existingConv.stage as string) || "new";
     const role = (existingConv.role as string) || null;
+    const aiPaused = Boolean((existingConv as any)?.ai_paused);
     const bookingId = (existingConv as any)?.booking_id ?? null;
 
     const { count: existingInboundMessageCount, error: existingInboundMessageErr } =
@@ -638,6 +639,11 @@ export async function POST(req: Request) {
     });
 
     const topic = detectTopic(body);
+    // 🚫 AI PAUSE: do not send auto replies
+if (!isHostInitiated && aiPaused) {
+  console.log("[AI][PAUSED] Skipping auto-reply for conversation:", conversationId);
+  return emptyTwimlResponse();
+}
 
     const rawInboundBody =
       body || `[media message with ${mediaItems.length} attachment(s)]`;
