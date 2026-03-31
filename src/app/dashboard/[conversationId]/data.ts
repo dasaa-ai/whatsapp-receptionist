@@ -20,6 +20,7 @@ export type ConversationDetail = {
   checkinDate: string;
   propertyName: string;
   bookingId: string | null;
+  aiPaused: boolean; // 👈 NEW
   messages: ConversationMessage[];
 };
 
@@ -29,16 +30,17 @@ export async function getConversationDetail(
   const convoRes = await supabaseAdmin
     .from("conversations")
     .select(`
-      id,
-      guest_name,
-      guest_language,
-      host_language,
-      stage,
-      document_status,
-      required_guest_documents,
-      received_guest_documents,
-      booking_id
-    `)
+  id,
+  guest_name,
+  guest_language,
+  host_language,
+  stage,
+  document_status,
+  required_guest_documents,
+  received_guest_documents,
+  booking_id,
+  ai_paused
+`)
     .eq("id", conversationId)
     .maybeSingle();
 
@@ -97,6 +99,7 @@ export async function getConversationDetail(
   }
 
   return {
+    aiPaused: conversation.ai_paused || false,
     id: conversation.id,
     guestName: conversation.guest_name || booking?.lead_guest_name || "Guest",
     guestLanguage: (conversation.guest_language || "en").toUpperCase(),
