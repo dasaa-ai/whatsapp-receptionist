@@ -981,20 +981,22 @@ export async function POST(req: Request) {
     }
 
     const { count: existingDocumentCount, error: existingDocumentCountErr } =
-      await supabaseAdmin
-        .from("guest_documents")
-        .select("*", { count: "exact", head: true })
-        .eq("conversation_id", conversationId)
-        .is("deleted_at", null);
+  await supabaseAdmin
+    .from("guest_documents")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId)
+    .is("deleted_at", null)
+    .neq("review_status", "rejected")
+    .neq("ai_screening_status", "fail");
 
-    if (existingDocumentCountErr) {
-      return new Response(
-        `Error checking guest documents: ${existingDocumentCountErr.message}`,
-        { status: 500 }
-      );
-    }
+if (existingDocumentCountErr) {
+  return new Response(
+    `Error checking guest documents: ${existingDocumentCountErr.message}`,
+    { status: 500 }
+  );
+}
 
-    const receivedGuestDocuments = existingDocumentCount ?? 0;
+const receivedGuestDocuments = existingDocumentCount ?? 0;
 
     const idReceived =
       receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
