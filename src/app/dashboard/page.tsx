@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getDashboardData } from "./data";
+import DashboardRealtime from "./DashboardRealtime";
 
 const toneMap: Record<string, string> = {
   needs_action: "bg-amber-50 text-amber-700 border-amber-200",
@@ -31,6 +32,8 @@ export default async function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-white via-slate-50 to-slate-100 text-slate-900">
+      <DashboardRealtime />
+
       <div className="mx-auto max-w-7xl px-6 py-8 lg:px-8">
         <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -38,9 +41,11 @@ export default async function DashboardPage() {
               <span>🏠</span>
               WhatsApp Receptionist
             </div>
+
             <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
               A host dashboard that feels calm, warm, and in control.
             </h1>
+
             <p className="mt-2 max-w-3xl text-base text-slate-600 sm:text-lg">
               Track conversations, guest documents, and multilingual replies in one clear place.
             </p>
@@ -50,6 +55,7 @@ export default async function DashboardPage() {
             <button className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm">
               Today
             </button>
+
             <button className="rounded-2xl bg-slate-900 px-4 py-2 text-sm text-white shadow-sm">
               Open live inbox
             </button>
@@ -118,9 +124,11 @@ export default async function DashboardPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className="text-lg font-medium tracking-tight">{item.guest}</h3>
+
                             <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600">
                               {item.displayId}
                             </span>
+
                             <span
                               className={`rounded-full border px-2.5 py-1 text-xs ${pill.className}`}
                             >
@@ -129,9 +137,11 @@ export default async function DashboardPage() {
                           </div>
 
                           <p className="mt-2 text-sm text-slate-600">{item.property}</p>
+
                           <p className="mt-3 line-clamp-1 text-sm text-slate-500">
                             {item.latest}
                           </p>
+
                           <p className="mt-2 text-xs uppercase tracking-wide text-slate-400">
                             Stage: {item.stage}
                           </p>
@@ -175,6 +185,7 @@ export default async function DashboardPage() {
                   Simple live indicators from your current system state.
                 </p>
               </div>
+
               <div className="space-y-4 px-6 pb-6">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <p className="font-medium leading-tight">Active conversations</p>
@@ -206,19 +217,23 @@ export default async function DashboardPage() {
                   A friendly summary for hosts.
                 </p>
               </div>
+
               <div className="space-y-3 px-6 pb-6">
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <span className="text-sm text-slate-600">Open conversations</span>
                   <span className="text-sm font-medium">{stats.activeConversations}</span>
                 </div>
+
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <span className="text-sm text-slate-600">Pending IDs</span>
                   <span className="text-sm font-medium">{stats.pendingIds}</span>
                 </div>
+
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <span className="text-sm text-slate-600">Ready check-ins</span>
                   <span className="text-sm font-medium">{stats.readyCheckins}</span>
                 </div>
+
                 <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <span className="text-sm text-slate-600">Languages used</span>
                   <span className="text-sm font-medium">{stats.languagesUsed}</span>
