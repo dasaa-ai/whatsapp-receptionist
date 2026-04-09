@@ -1667,43 +1667,48 @@ export async function POST(req: Request) {
           });
 
           if (visualDuplicateDecision.kind === "review") {
-            duplicateReviewCount += 1;
+  duplicateReviewCount += 1;
 
-            const likelySamePerson =
-              screening.nameMatchBooking === true ||
-              namesLooselyMatch(screening.fullName, bookingGuestName);
+  const likelySamePerson =
+    screening.nameMatchBooking === true ||
+    namesLooselyMatch(screening.fullName, bookingGuestName);
 
-            const strongDocumentMatch =
-              screening.documentNumber !== null ||
-              likelySamePerson;
+  const sameDocumentNumber =
+    screening.documentNumber !== null &&
+    screening.documentNumber.length >= 4;
 
-            if (
-              visualDuplicateDecision.similarityScore !== null &&
-              visualDuplicateDecision.similarityScore <= VISUAL_DUPLICATE_THRESHOLD &&
-              strongDocumentMatch
-            ) {
-              await supabaseAdmin
-                .from("guest_documents")
-                .update({
-                  duplicate_status: "likely_duplicate",
-                  review_status: "rejected",
-                  verification_status: "rejected",
-                  ai_screening_status: "fail",
-                  ai_screening_notes:
-                    "Rejected after duplicate review because the image was highly similar and the extracted details strongly matched a prior document.",
-                })
-                .eq("id", insertRes.data.id);
+  const strongMatch = likelySamePerson || sameDocumentNumber;
 
-              duplicateRejectedCount += 1;
-              if (duplicateReviewCount > 0) duplicateReviewCount -= 1;
+  // 🔥 NEW LOGIC
+  if (
+    visualDuplicateDecision.similarityScore !== null &&
+    visualDuplicateDecision.similarityScore <= VISUAL_DUPLICATE_THRESHOLD &&
+    strongMatch
+  ) {
+    await supabaseAdmin
+      .from("guest_documents")
+      .update({
+        duplicate_status: "likely_duplicate",
+        review_status: "rejected",
+        verification_status: "rejected",
+        ai_screening_status: "fail",
+        ai_screening_notes:
+          "Rejected after smart duplicate validation: visually similar and document/person details matched a previous submission.",
+      })
+      .eq("id", insertRes.data.id);
 
-              aiRejectReasons.push(
-                "This file appears to be a duplicate of a previously submitted document."
-              );
+    duplicateRejectedCount += 1;
+    if (duplicateReviewCount > 0) duplicateReviewCount -= 1;
 
-              continue;
-            }
-          }
+    aiRejectReasons.push(
+      "This file appears to be a duplicate of a previously submitted document."
+    );
+
+    continue;
+  }
+
+  // else → keep as review (DO NOT reject)
+}
 
           if (screening.status === "fail") {
             aiRejectedCount += 1;
