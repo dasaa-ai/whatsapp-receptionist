@@ -15,8 +15,8 @@ export const runtime = "nodejs";
 const AUTO_REPLY_COOLDOWN_SECONDS = 25;
 
 // Lower = more similar
-const VISUAL_DUPLICATE_THRESHOLD = 6;
-const VISUAL_REVIEW_THRESHOLD = 14;
+const VISUAL_DUPLICATE_THRESHOLD = 20;
+const VISUAL_REVIEW_THRESHOLD = 40;
 
 function xmlEscape(s: string) {
   return s
@@ -182,36 +182,134 @@ function namesLooselyMatch(a: string | null | undefined, b: string | null | unde
   return overlap >= 2;
 }
 
-async function buildVisualHashFromBuffer(input: Buffer): Promise<string> {
-  const tiny = await sharp(input)
+async function normalizeImageForHashing(input: Buffer): Promise<sharp.Sharp> {
+  const normalized = sharp(input)
     .rotate()
     .flatten({ background: "#ffffff" })
-    .grayscale()
-    .resize(16, 16, { fit: "fill" })
-    .raw()
-    .toBuffer();
+    .grayscale();
 
-  if (!tiny.length) {
-    throw new Error("Could not build visual hash buffer");
+  return normalized;
+}
+
+async function extractCenterCropBuffer(input: Buffer): Promise<Buffer> {
+  const image = await normalizeImageForHashing(input);
+  const meta = await image.metadata();
+
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+
+  if (!width || !height) {
+    return await image.png().toBuffer();
   }
 
-  let sum = 0;
-  for (const value of tiny) sum += value;
+  const left = Math.floor(width * 0.1);
+  const top = Math.floor(height * 0.1);
+  const cropWidth = Math.max(1, Math.floor(width * 0.8));
+  const cropHeight = Math.max(1, Math.floor(height * 0.8));
 
-  const avg = sum / tiny.length;
+  return await image
+    .extract({
+      left,
+      top,
+      width: Math.min(cropWidth, width - left),
+      height: Math.min(cropHeight, height - top),
+    })
+    .png()
+    .toBuffer();
+}
+
+async function buildDHash64(params: {
+  input: Buffer;
+  axis: "horizontal" | "vertical";
+}): Promise<string> {
+  const { input, axis } = params;
+
+  const resized =
+    axis === "horizontal"
+      ? await sharp(input)
+          .rotate()
+          .flatten({ background: "#ffffff" })
+          .grayscale()
+          .resize(9, 8, { fit: "fill" })
+          .raw()
+          .toBuffer()
+      : await sharp(input)
+          .rotate()
+          .flatten({ background: "#ffffff" })
+          .grayscale()
+          .resize(8, 9, { fit: "fill" })
+          .raw()
+          .toBuffer();
 
   let bits = "";
-  for (const value of tiny) {
-    bits += value >= avg ? "1" : "0";
+
+  if (axis === "horizontal") {
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const left = resized[y * 9 + x];
+        const right = resized[y * 9 + x + 1];
+        bits += left > right ? "1" : "0";
+      }
+    }
+  } else {
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const top = resized[y * 8 + x];
+        const bottom = resized[(y + 1) * 8 + x];
+        bits += top > bottom ? "1" : "0";
+      }
+    }
   }
 
   let hex = "";
   for (let i = 0; i < bits.length; i += 4) {
-    const nibble = bits.slice(i, i + 4).padEnd(4, "0");
-    hex += parseInt(nibble, 2).toString(16);
+    hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
   }
 
   return hex;
+}
+
+type ParsedVisualHash = {
+  fh: string;
+  fv: string;
+  ch: string;
+  cv: string;
+};
+
+function parseCombinedVisualHash(value: string | null | undefined): ParsedVisualHash | null {
+  if (!value || typeof value !== "string") return null;
+
+  const parts = value.split("|");
+  if (parts.length !== 4) return null;
+
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    const [k, v] = part.split(":");
+    if (!k || !v) return null;
+    map[k] = v;
+  }
+
+  if (!map.fh || !map.fv || !map.ch || !map.cv) return null;
+
+  return {
+    fh: map.fh,
+    fv: map.fv,
+    ch: map.ch,
+    cv: map.cv,
+  };
+}
+
+async function buildVisualHashFromBuffer(input: Buffer): Promise<string> {
+  const centerCrop = await extractCenterCropBuffer(input);
+
+  const [fh, fv, ch, cv] = await Promise.all([
+    buildDHash64({ input, axis: "horizontal" }),
+    buildDHash64({ input, axis: "vertical" }),
+    buildDHash64({ input: centerCrop, axis: "horizontal" }),
+    buildDHash64({ input: centerCrop, axis: "vertical" }),
+  ]);
+
+  return `fh:${fh}|fv:${fv}|ch:${ch}|cv:${cv}`;
 }
 
 function hexToBinary(hex: string): string {
@@ -237,6 +335,32 @@ function hammingDistanceHex(a: string, b: string): number {
   return distance;
 }
 
+function compareCombinedVisualHashes(current: ParsedVisualHash, previous: ParsedVisualHash) {
+  const fullHorizontal = hammingDistanceHex(current.fh, previous.fh);
+  const fullVertical = hammingDistanceHex(current.fv, previous.fv);
+  const centerHorizontal = hammingDistanceHex(current.ch, previous.ch);
+  const centerVertical = hammingDistanceHex(current.cv, previous.cv);
+
+  const minDistance = Math.min(
+    fullHorizontal,
+    fullVertical,
+    centerHorizontal,
+    centerVertical
+  );
+
+  const avgDistance =
+    (fullHorizontal + fullVertical + centerHorizontal + centerVertical) / 4;
+
+  return {
+    fullHorizontal,
+    fullVertical,
+    centerHorizontal,
+    centerVertical,
+    minDistance,
+    avgDistance,
+  };
+}
+
 async function findVisualDuplicateDecision(params: {
   conversationId: string;
   currentFileHash: string;
@@ -256,14 +380,26 @@ async function findVisualDuplicateDecision(params: {
   }
 
   let perceptualHash: string | null = null;
+  let currentParsed: ParsedVisualHash | null = null;
 
   try {
     perceptualHash = await buildVisualHashFromBuffer(fileBuffer);
+    currentParsed = parseCombinedVisualHash(perceptualHash);
   } catch (error) {
     console.error("[VISUAL_HASH][COMPUTE_ERROR]", error);
     return {
       kind: "accept",
       perceptualHash: null,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  if (!currentParsed) {
+    return {
+      kind: "accept",
+      perceptualHash,
       similarityScore: null,
       duplicateOfDocumentId: null,
       notes: null,
@@ -299,7 +435,7 @@ async function findVisualDuplicateDecision(params: {
   const comparableDocs = (priorDocs || []).filter((doc: any) => {
     if (!doc?.perceptual_hash) return false;
     if (!doc?.mime_type?.startsWith?.("image/")) return false;
-    return true;
+    return parseCombinedVisualHash(doc.perceptual_hash) !== null;
   });
 
   if (comparableDocs.length === 0) {
@@ -312,13 +448,31 @@ async function findVisualDuplicateDecision(params: {
     };
   }
 
-  let bestMatch: { id: string; distance: number } | null = null;
+  let bestMatch:
+    | {
+        id: string;
+        score: number;
+        minDistance: number;
+        avgDistance: number;
+      }
+    | null = null;
 
   for (const doc of comparableDocs) {
     try {
-      const distance = hammingDistanceHex(perceptualHash, doc.perceptual_hash);
-      if (!bestMatch || distance < bestMatch.distance) {
-        bestMatch = { id: doc.id, distance };
+      const parsed = parseCombinedVisualHash(doc.perceptual_hash);
+      if (!parsed) continue;
+
+      const cmp = compareCombinedVisualHashes(currentParsed, parsed);
+
+      const score = Math.round(cmp.minDistance * 0.7 + cmp.avgDistance * 0.3);
+
+      if (!bestMatch || score < bestMatch.score) {
+        bestMatch = {
+          id: doc.id,
+          score,
+          minDistance: cmp.minDistance,
+          avgDistance: cmp.avgDistance,
+        };
       }
     } catch (error) {
       console.error("[VISUAL_HASH][COMPARE_ERROR]", error);
@@ -335,21 +489,27 @@ async function findVisualDuplicateDecision(params: {
     };
   }
 
-  if (bestMatch.distance <= VISUAL_DUPLICATE_THRESHOLD) {
+  if (
+    bestMatch.minDistance <= VISUAL_DUPLICATE_THRESHOLD ||
+    bestMatch.score <= VISUAL_DUPLICATE_THRESHOLD
+  ) {
     return {
       kind: "duplicate",
       perceptualHash,
-      similarityScore: bestMatch.distance,
+      similarityScore: bestMatch.score,
       duplicateOfDocumentId: bestMatch.id,
       notes: "This image appears visually very similar to a previously submitted document.",
     };
   }
 
-  if (bestMatch.distance <= VISUAL_REVIEW_THRESHOLD) {
+  if (
+    bestMatch.minDistance <= VISUAL_REVIEW_THRESHOLD ||
+    bestMatch.score <= VISUAL_REVIEW_THRESHOLD
+  ) {
     return {
       kind: "review",
       perceptualHash,
-      similarityScore: bestMatch.distance,
+      similarityScore: bestMatch.score,
       duplicateOfDocumentId: bestMatch.id,
       notes: "This image appears visually similar to a previously submitted document and should be reviewed.",
     };
@@ -358,7 +518,7 @@ async function findVisualDuplicateDecision(params: {
   return {
     kind: "accept",
     perceptualHash,
-    similarityScore: bestMatch.distance,
+    similarityScore: bestMatch.score,
     duplicateOfDocumentId: bestMatch.id,
     notes: null,
   };
