@@ -1,5 +1,6 @@
 import twilio from "twilio";
 import { NextResponse } from "next/server";
+import crypto from "crypto";
 
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { extractIncomingMedia } from "@/lib/extractIncomingMedia";
@@ -1094,6 +1095,7 @@ const receivedGuestDocuments = existingDocumentCount ?? 0;
 
         try {
           const fileBuffer = await downloadTwilioMedia(mediaItem.url);
+          const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
           const extension = getExtensionFromMimeType(mediaItem.contentType);
 
           const storagePath = `conversation-${conversationId}/${Date.now()}-${mediaItem.index}-${messageSid}.${extension}`;
@@ -1106,10 +1108,26 @@ const receivedGuestDocuments = existingDocumentCount ?? 0;
 
           const retentionDeleteAt = new Date();
           retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
+          
+          // 🔴 DUPLICATE CHECK (hash-based)
+const { count: duplicateCount } = await supabaseAdmin
+  .from("guest_documents")
+  .select("*", { count: "exact", head: true })
+  .eq("conversation_id", conversationId)
+  .eq("file_hash", fileHash)
+  .is("deleted_at", null);
+
+if ((duplicateCount ?? 0) > 0) {
+  console.log("[DUPLICATE][REJECTED]", fileHash);
+  aiRejectedCount += 1;
+  aiRejectReasons.push("This file appears to be a duplicate of a previously submitted document.");
+  continue;
+}
 
           const insertRes = await supabaseAdmin
             .from("guest_documents")
             .insert({
+              file_hash: fileHash,
               conversation_id: conversationId,
               booking_id: bookingId,
               guest_phone: guestPhone,
