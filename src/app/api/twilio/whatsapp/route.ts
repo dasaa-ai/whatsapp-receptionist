@@ -1,6 +1,7 @@
 import twilio from "twilio";
 import { NextResponse } from "next/server";
 import crypto from "crypto";
+import sharp from "sharp";
 
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { extractIncomingMedia } from "@/lib/extractIncomingMedia";
@@ -12,6 +13,10 @@ import { uploadGuestDocument } from "@/lib/uploadGuestDocument";
 export const runtime = "nodejs";
 
 const AUTO_REPLY_COOLDOWN_SECONDS = 25;
+
+// Lower = more similar
+const VISUAL_DUPLICATE_THRESHOLD = 6;
+const VISUAL_REVIEW_THRESHOLD = 14;
 
 function xmlEscape(s: string) {
   return s
@@ -44,6 +49,29 @@ type TopicKey =
   | "parking"
   | "pricing"
   | "general";
+
+type VisualDuplicateDecision =
+  | {
+      kind: "accept";
+      perceptualHash: string | null;
+      similarityScore: number | null;
+      duplicateOfDocumentId: string | null;
+      notes: string | null;
+    }
+  | {
+      kind: "duplicate";
+      perceptualHash: string | null;
+      similarityScore: number | null;
+      duplicateOfDocumentId: string | null;
+      notes: string;
+    }
+  | {
+      kind: "review";
+      perceptualHash: string | null;
+      similarityScore: number | null;
+      duplicateOfDocumentId: string | null;
+      notes: string;
+    };
 
 function normalizeLang(lang?: string | null): string | null {
   if (!lang) return null;
@@ -119,6 +147,221 @@ function cleanNullableText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const v = value.trim();
   return v ? v : null;
+}
+
+function normalizePersonName(value: string | null | undefined): string | null {
+  if (!value) return null;
+
+  const normalized = value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized || null;
+}
+
+function namesLooselyMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  const aa = normalizePersonName(a);
+  const bb = normalizePersonName(b);
+
+  if (!aa || !bb) return false;
+  if (aa === bb) return true;
+  if (aa.includes(bb) || bb.includes(aa)) return true;
+
+  const aParts = new Set(aa.split(" ").filter(Boolean));
+  const bParts = new Set(bb.split(" ").filter(Boolean));
+
+  let overlap = 0;
+  for (const part of aParts) {
+    if (bParts.has(part)) overlap += 1;
+  }
+
+  return overlap >= 2;
+}
+
+async function buildVisualHashFromBuffer(input: Buffer): Promise<string> {
+  const tiny = await sharp(input)
+    .rotate()
+    .flatten({ background: "#ffffff" })
+    .grayscale()
+    .resize(16, 16, { fit: "fill" })
+    .raw()
+    .toBuffer();
+
+  if (!tiny.length) {
+    throw new Error("Could not build visual hash buffer");
+  }
+
+  let sum = 0;
+  for (const value of tiny) sum += value;
+
+  const avg = sum / tiny.length;
+
+  let bits = "";
+  for (const value of tiny) {
+    bits += value >= avg ? "1" : "0";
+  }
+
+  let hex = "";
+  for (let i = 0; i < bits.length; i += 4) {
+    const nibble = bits.slice(i, i + 4).padEnd(4, "0");
+    hex += parseInt(nibble, 2).toString(16);
+  }
+
+  return hex;
+}
+
+function hexToBinary(hex: string): string {
+  return hex
+    .split("")
+    .map((c) => parseInt(c, 16).toString(2).padStart(4, "0"))
+    .join("");
+}
+
+function hammingDistanceHex(a: string, b: string): number {
+  const aa = hexToBinary(a);
+  const bb = hexToBinary(b);
+
+  if (aa.length !== bb.length) {
+    throw new Error("Hash lengths differ");
+  }
+
+  let distance = 0;
+  for (let i = 0; i < aa.length; i++) {
+    if (aa[i] !== bb[i]) distance += 1;
+  }
+
+  return distance;
+}
+
+async function findVisualDuplicateDecision(params: {
+  conversationId: string;
+  currentFileHash: string;
+  fileBuffer: Buffer;
+  mimeType: string | null;
+}): Promise<VisualDuplicateDecision> {
+  const { conversationId, currentFileHash, fileBuffer, mimeType } = params;
+
+  if (!mimeType || !mimeType.startsWith("image/")) {
+    return {
+      kind: "accept",
+      perceptualHash: null,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  let perceptualHash: string | null = null;
+
+  try {
+    perceptualHash = await buildVisualHashFromBuffer(fileBuffer);
+  } catch (error) {
+    console.error("[VISUAL_HASH][COMPUTE_ERROR]", error);
+    return {
+      kind: "accept",
+      perceptualHash: null,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  const { data: priorDocs, error } = await supabaseAdmin
+    .from("guest_documents")
+    .select(`
+      id,
+      file_hash,
+      perceptual_hash,
+      mime_type,
+      review_status,
+      ai_screening_status,
+      duplicate_status
+    `)
+    .eq("conversation_id", conversationId)
+    .is("deleted_at", null)
+    .neq("file_hash", currentFileHash);
+
+  if (error) {
+    console.error("[VISUAL_HASH][FETCH_PRIOR_ERROR]", error);
+    return {
+      kind: "accept",
+      perceptualHash,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  const comparableDocs = (priorDocs || []).filter((doc: any) => {
+    if (!doc?.perceptual_hash) return false;
+    if (!doc?.mime_type?.startsWith?.("image/")) return false;
+    return true;
+  });
+
+  if (comparableDocs.length === 0) {
+    return {
+      kind: "accept",
+      perceptualHash,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  let bestMatch: { id: string; distance: number } | null = null;
+
+  for (const doc of comparableDocs) {
+    try {
+      const distance = hammingDistanceHex(perceptualHash, doc.perceptual_hash);
+      if (!bestMatch || distance < bestMatch.distance) {
+        bestMatch = { id: doc.id, distance };
+      }
+    } catch (error) {
+      console.error("[VISUAL_HASH][COMPARE_ERROR]", error);
+    }
+  }
+
+  if (!bestMatch) {
+    return {
+      kind: "accept",
+      perceptualHash,
+      similarityScore: null,
+      duplicateOfDocumentId: null,
+      notes: null,
+    };
+  }
+
+  if (bestMatch.distance <= VISUAL_DUPLICATE_THRESHOLD) {
+    return {
+      kind: "duplicate",
+      perceptualHash,
+      similarityScore: bestMatch.distance,
+      duplicateOfDocumentId: bestMatch.id,
+      notes: "This image appears visually very similar to a previously submitted document.",
+    };
+  }
+
+  if (bestMatch.distance <= VISUAL_REVIEW_THRESHOLD) {
+    return {
+      kind: "review",
+      perceptualHash,
+      similarityScore: bestMatch.distance,
+      duplicateOfDocumentId: bestMatch.id,
+      notes: "This image appears visually similar to a previously submitted document and should be reviewed.",
+    };
+  }
+
+  return {
+    kind: "accept",
+    perceptualHash,
+    similarityScore: bestMatch.distance,
+    duplicateOfDocumentId: bestMatch.id,
+    notes: null,
+  };
 }
 
 async function translateBetweenLanguages(params: {
@@ -982,22 +1225,24 @@ export async function POST(req: Request) {
     }
 
     const { count: existingDocumentCount, error: existingDocumentCountErr } =
-  await supabaseAdmin
-    .from("guest_documents")
-    .select("*", { count: "exact", head: true })
-    .eq("conversation_id", conversationId)
-    .is("deleted_at", null)
-    .neq("review_status", "rejected")
-    .neq("ai_screening_status", "fail");
+      await supabaseAdmin
+        .from("guest_documents")
+        .select("*", { count: "exact", head: true })
+        .eq("conversation_id", conversationId)
+        .is("deleted_at", null)
+        .neq("review_status", "rejected")
+        .neq("ai_screening_status", "fail")
+        .not("duplicate_status", "eq", "exact_duplicate")
+        .not("duplicate_status", "eq", "likely_duplicate");
 
-if (existingDocumentCountErr) {
-  return new Response(
-    `Error checking guest documents: ${existingDocumentCountErr.message}`,
-    { status: 500 }
-  );
-}
+    if (existingDocumentCountErr) {
+      return new Response(
+        `Error checking guest documents: ${existingDocumentCountErr.message}`,
+        { status: 500 }
+      );
+    }
 
-const receivedGuestDocuments = existingDocumentCount ?? 0;
+    const receivedGuestDocuments = existingDocumentCount ?? 0;
 
     const idReceived =
       receivedGuestDocuments >= requiredGuestDocuments && requiredGuestDocuments > 0;
@@ -1080,11 +1325,13 @@ const receivedGuestDocuments = existingDocumentCount ?? 0;
         });
       }
 
-            let acceptedCount = 0;
+      let acceptedCount = 0;
       let invalidCount = 0;
       let processingFailedCount = 0;
       let aiRejectedCount = 0;
       let aiReviewCount = 0;
+      let duplicateRejectedCount = 0;
+      let duplicateReviewCount = 0;
       const aiRejectReasons: string[] = [];
 
       for (const mediaItem of mediaItems) {
@@ -1098,6 +1345,101 @@ const receivedGuestDocuments = existingDocumentCount ?? 0;
           const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
           const extension = getExtensionFromMimeType(mediaItem.contentType);
 
+          const retentionDeleteAt = new Date();
+          retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
+
+          const { data: exactDuplicateRow, error: exactDuplicateErr } = await supabaseAdmin
+            .from("guest_documents")
+            .select("id")
+            .eq("conversation_id", conversationId)
+            .eq("file_hash", fileHash)
+            .is("deleted_at", null)
+            .limit(1)
+            .maybeSingle();
+
+          if (exactDuplicateErr) {
+            throw exactDuplicateErr;
+          }
+
+          if (exactDuplicateRow?.id) {
+            console.log("[DUPLICATE][EXACT_REJECTED]", fileHash);
+
+            duplicateRejectedCount += 1;
+            aiRejectReasons.push(
+              "This file appears to be an exact duplicate of a previously submitted document."
+            );
+
+            await supabaseAdmin.from("guest_documents").insert({
+              file_hash: fileHash,
+              perceptual_hash: null,
+              duplicate_status: "exact_duplicate",
+              duplicate_of_document_id: exactDuplicateRow.id,
+              similarity_score: 0,
+              conversation_id: conversationId,
+              booking_id: bookingId,
+              guest_phone: guestPhone,
+              twilio_message_sid: messageSid,
+              storage_bucket: null,
+              storage_path: null,
+              mime_type: mediaItem.contentType,
+              file_size_bytes: fileBuffer.length,
+              document_kind: "id_document",
+              review_status: "rejected",
+              verification_status: "rejected",
+              retention_delete_at: retentionDeleteAt.toISOString(),
+              ai_screening_status: "fail",
+              ai_screening_notes: "Rejected as an exact duplicate of a previously submitted file.",
+            });
+
+            continue;
+          }
+
+          const visualDuplicateDecision = await findVisualDuplicateDecision({
+            conversationId,
+            currentFileHash: fileHash,
+            fileBuffer,
+            mimeType: mediaItem.contentType,
+          });
+
+          if (visualDuplicateDecision.kind === "duplicate") {
+            console.log("[DUPLICATE][VISUAL_REJECTED]", {
+              similarityScore: visualDuplicateDecision.similarityScore,
+              duplicateOfDocumentId: visualDuplicateDecision.duplicateOfDocumentId,
+            });
+
+            duplicateRejectedCount += 1;
+            aiRejectReasons.push(
+              visualDuplicateDecision.notes ||
+                "This file appears to be a duplicate of a previously submitted document."
+            );
+
+            await supabaseAdmin.from("guest_documents").insert({
+              file_hash: fileHash,
+              perceptual_hash: visualDuplicateDecision.perceptualHash,
+              duplicate_status: "likely_duplicate",
+              duplicate_of_document_id: visualDuplicateDecision.duplicateOfDocumentId,
+              similarity_score: visualDuplicateDecision.similarityScore,
+              conversation_id: conversationId,
+              booking_id: bookingId,
+              guest_phone: guestPhone,
+              twilio_message_sid: messageSid,
+              storage_bucket: null,
+              storage_path: null,
+              mime_type: mediaItem.contentType,
+              file_size_bytes: fileBuffer.length,
+              document_kind: "id_document",
+              review_status: "rejected",
+              verification_status: "rejected",
+              retention_delete_at: retentionDeleteAt.toISOString(),
+              ai_screening_status: "fail",
+              ai_screening_notes:
+                visualDuplicateDecision.notes ||
+                "Rejected because the image appeared visually too similar to a previous upload.",
+            });
+
+            continue;
+          }
+
           const storagePath = `conversation-${conversationId}/${Date.now()}-${mediaItem.index}-${messageSid}.${extension}`;
 
           const uploaded = await uploadGuestDocument({
@@ -1106,28 +1448,17 @@ const receivedGuestDocuments = existingDocumentCount ?? 0;
             storagePath,
           });
 
-          const retentionDeleteAt = new Date();
-          retentionDeleteAt.setDate(retentionDeleteAt.getDate() + 7);
-          
-          // 🔴 DUPLICATE CHECK (hash-based)
-const { count: duplicateCount } = await supabaseAdmin
-  .from("guest_documents")
-  .select("*", { count: "exact", head: true })
-  .eq("conversation_id", conversationId)
-  .eq("file_hash", fileHash)
-  .is("deleted_at", null);
-
-if ((duplicateCount ?? 0) > 0) {
-  console.log("[DUPLICATE][REJECTED]", fileHash);
-  aiRejectedCount += 1;
-  aiRejectReasons.push("This file appears to be a duplicate of a previously submitted document.");
-  continue;
-}
+          const initialDuplicateStatus =
+            visualDuplicateDecision.kind === "review" ? "needs_review" : "none";
 
           const insertRes = await supabaseAdmin
             .from("guest_documents")
             .insert({
               file_hash: fileHash,
+              perceptual_hash: visualDuplicateDecision.perceptualHash,
+              duplicate_status: initialDuplicateStatus,
+              duplicate_of_document_id: visualDuplicateDecision.duplicateOfDocumentId,
+              similarity_score: visualDuplicateDecision.similarityScore,
               conversation_id: conversationId,
               booking_id: bookingId,
               guest_phone: guestPhone,
@@ -1141,6 +1472,7 @@ if ((duplicateCount ?? 0) > 0) {
               verification_status: "pending",
               retention_delete_at: retentionDeleteAt.toISOString(),
               ai_screening_status: "pending",
+              ai_screening_notes: visualDuplicateDecision.notes,
             })
             .select("id")
             .single();
@@ -1173,6 +1505,45 @@ if ((duplicateCount ?? 0) > 0) {
             mimeType: mediaItem.contentType,
             bookingGuestName,
           });
+
+          if (visualDuplicateDecision.kind === "review") {
+            duplicateReviewCount += 1;
+
+            const likelySamePerson =
+              screening.nameMatchBooking === true ||
+              namesLooselyMatch(screening.fullName, bookingGuestName);
+
+            const strongDocumentMatch =
+              screening.documentNumber !== null ||
+              likelySamePerson;
+
+            if (
+              visualDuplicateDecision.similarityScore !== null &&
+              visualDuplicateDecision.similarityScore <= VISUAL_DUPLICATE_THRESHOLD &&
+              strongDocumentMatch
+            ) {
+              await supabaseAdmin
+                .from("guest_documents")
+                .update({
+                  duplicate_status: "likely_duplicate",
+                  review_status: "rejected",
+                  verification_status: "rejected",
+                  ai_screening_status: "fail",
+                  ai_screening_notes:
+                    "Rejected after duplicate review because the image was highly similar and the extracted details strongly matched a prior document.",
+                })
+                .eq("id", insertRes.data.id);
+
+              duplicateRejectedCount += 1;
+              if (duplicateReviewCount > 0) duplicateReviewCount -= 1;
+
+              aiRejectReasons.push(
+                "This file appears to be a duplicate of a previously submitted document."
+              );
+
+              continue;
+            }
+          }
 
           if (screening.status === "fail") {
             aiRejectedCount += 1;
@@ -1274,21 +1645,34 @@ if ((duplicateCount ?? 0) > 0) {
           replyText = `Thank you — we have received ${finalReceivedCount} of ${requiredGuestDocuments} required guest ID document(s). Please send the remaining ${remaining}.`;
         }
 
+        if (duplicateRejectedCount > 0) {
+          replyText += ` ${duplicateRejectedCount} file(s) were rejected because they appeared to be duplicate uploads.`;
+        }
+
         if (aiRejectedCount > 0) {
           replyText += ` ${aiRejectedCount} file(s) were automatically rejected because they did not look like readable ID documents. Please resend a clear real ID image.`;
         }
 
-        if (aiReviewCount > 0) {
+        if (duplicateReviewCount > 0 || aiReviewCount > 0) {
           replyText += ` Some accepted file(s) may still need host review.`;
         }
 
         if (invalidCount > 0 || processingFailedCount > 0) {
           replyText += ` ${invalidCount + processingFailedCount} file(s) could not be processed. If needed, please resend them as JPG, PNG, or PDF.`;
         }
+      } else if (duplicateRejectedCount > 0) {
+        const primaryReason =
+          aiRejectReasons[0] ||
+          "The uploaded file appears to be a duplicate of a previously submitted document.";
+
+        replyText =
+          `We could not accept your file as a valid new ID document. ${primaryReason} ` +
+          `Please upload a different required document if needed.`;
       } else if (aiRejectedCount > 0) {
         const primaryReason =
           aiRejectReasons[0] ||
           "The uploaded file did not look like a readable ID document.";
+
         replyText =
           `We could not accept your file as a valid ID document. ${primaryReason} ` +
           `Please upload a clear photo of a real passport, driving licence, or national ID card in JPG, PNG, or PDF format.`;
@@ -1470,3 +1854,4 @@ export async function GET() {
     note: "Twilio WhatsApp webhook endpoint. Use POST from Twilio.",
   });
 }
+
